@@ -1,0 +1,212 @@
+# .plan — Orcon controller: fix defects, make the ESP32 truly autonomous
+
+**Status:** design complete, no implementation started
+**Supersedes:** the previous version of this file (external-component refactor that aimed to reproduce `docs/orcon-reference.yaml` byte-for-byte, including its defects). That framing is replaced: this round repairs the defects and adds the autonomy guarantees below. `TODO.md` is the executable checklist derived from this document.
+
+---
+
+## Context
+
+The live configuration was `docs/orcon-reference.yaml`: a single ESPHome YAML with ~100 lines of inline C++ driving an Orcon ventilation unit on an ESP32 (Open AIR Mini). It works in practice but carries a compile blocker, a dead hold timer, and an architecture that quietly depends on Home Assistant.
+
+**Core requirement (non-negotiable):** the ESP32 is an autonomous element — it regulates on sensors and time, with no dependency on Home Assistant or the internet. HA, physical buttons wired through HA, and Siri/HomeKit via Homebridge are a layer *on top* of the autonomous controller, not a precondition for it. If that layer goes down, automatic control must keep running, and manual intervention must remain possible through the built-in ESPHome web GUI. One source of truth: no control logic lives in HA automations alongside the on-device logic.
+
+This round is **repair, not redesign**: fix the known defects and give the controller an explicit, testable state machine. No proportional control, no external component yet — both are documented as future options.
+
+**Deliverable of this task: `.plan` and `TODO.md` only. No code changes.**
+
+### Decisions taken (confirmed with the user)
+
+| Topic | Decision |
+|---|---|
+| UIT during high RH | UIT is absolute. A high-RH condition raises an alarm/diagnostic entity only; it never overrides the user's UIT selection. |
+| Boot mode | Restore the last selected mode via `restore_value`; fall back to AUTO only when no valid restored value exists. Drop the unconditional `select.set: AUTO` on every boot. |
+| Sensor NaN / stale | After a staleness timeout: drive a fixed idle speed (15%), enter FAULT state, expose a `problem` binary_sensor. Ventilation keeps running rather than freezing. |
+| Control law | Threshold + hysteresis + dwell time. Proportional CO₂ control is documented as a future option, not built now. |
+
+### Repository decisions
+
+- `docs/orcon-reference.yaml` is **frozen** as historical reference. It is never edited again.
+- The live config becomes **`orcon.yaml` in the repo root**, seeded from the reference.
+
+---
+
+## Defect register (verified against `docs/orcon-reference.yaml`)
+
+| # | Defect | Evidence |
+|---|---|---|
+| 1 | `trigger_source: "watchdog"` passed to a script with no declared `parameters:` → `esphome config` fails to compile | yaml:447 vs yaml:152-154 |
+| 2 | `id(fan_hold_until) = 0;` sits outside the expiry `if/else`, so it runs on **every** pass through the hold branch. Effective hold ≈ one evaluation cycle, not the intended 300 s | yaml:298-309 |
+| 3 | Fan state is inferred from `current_target_speed == high_speed / hold_speed` (int equality), not explicit state. Breaks on day↔night rollover (40 stops being "high" at 22:00 → spurious clean-start, fan drops to 15%) and overlaps with manual speeds (15, 35) | yaml:227-229, 272, 289, 297 |
+| 4 | No `now.is_valid()` check; sole time source is `homeassistant_time` → all timing and the day/night profile break when HA is unreachable, directly violating the autonomy requirement | yaml:49-51, 157-158 |
+| 5 | NaN sensor value → silent `return`, control freezes indefinitely with no alarm | yaml:251-254 |
+| 6 | RH threshold is a fixed 60% level; a shower is a *rate* event, not a level event | yaml:259 |
+| 7 | No hysteresis; only the 300 s hold (itself broken by #2) damps oscillation around a threshold — can pump | yaml:257-261 |
+| 8 | `delta` / `throttle_average` filters sit directly on the physical sensors, so they degrade both the HA display *and* the control input together | yaml:362-364, 382-384, 395-397, 412-414 |
+| 9 | `orcon_rpm` (tachometer) is published but never used for commanded-vs-actual diagnosis | yaml:316-321 |
+| 10 | ~100 lines of C++ inline in YAML — not unit-testable, not compilable off-device | yaml:156-312 |
+| 11 | No `restore_value` on the select or the globals; `on_boot` forces AUTO unconditionally, discarding the user's last choice on every power cycle | yaml:8-10, 82-94, 99-110 |
+| 12 | `last_evaluation_time` is written *before* the NaN check, so a NaN-aborted evaluation still consumes the cooldown window | yaml:243 vs 251 |
+| 13 | `on_boot`'s `fan.turn_on: speed 15` does not write `current_target_speed`, so bookkeeping and reality can disagree from t=0. Also, `initial_option: "RUST"` fires `on_value` at select-setup time, running an evaluation ~15 s before the boot block finishes | yaml:12-14, 110 |
+
+(#12 and #13 were found while reading the YAML in detail; they are folded into the same repair pass as the 11 originally listed.)
+
+---
+
+## Documentation alignment
+
+Both Markdown specs describe the *intended* system, not the shipped one, and neither reflects the new autonomy/fail-safe requirements. Per instruction, my own reading of the YAML plus the defects above outweighs both documents where they differ.
+
+- **`FUNCTIONAL-SPEC.md`** — wrong in ≥6 places: claims cooldown gates *all* evaluations (Invariant 4) when it is inside the AUTO branch only (yaml:239), so manual modes are never gated; claims `last_evaluation_time` is written in manual mode and at the *end* of evaluation (neither is true, see #12); lists the clean-start speed set as 6 values including 85 (yaml:227-229 compares against 3 values, profile-dependent); Invariant 6 ("hold timer counts down independently") is defect #2 inverted — it describes the intended behaviour, not the bug. It has no concept of hysteresis, FAULT, staleness, or time-source validity.
+- **`REFERENCE-IMPLEMENTATION.md`** — accurate as a description of the frozen YAML, but is a description of the *old* file. It must be labelled as documenting `docs/orcon-reference.yaml` only, not the new `orcon.yaml`.
+- **`README.md`** — "Preserve existing behaviour" and "Refactor before redesigning" contradict this round; it also references a deleted `ARCHITECTURE.md`.
+
+**Resolution (Step 10 below):** `FUNCTIONAL-SPEC.md` is rewritten to specify the *new* behaviour once it's built. `REFERENCE-IMPLEMENTATION.md` gets a header marking it as historical/non-normative. `README.md` gets its stale references and "preserve behaviour" framing corrected.
+
+---
+
+## Target design
+
+### 1. Explicit state machine
+
+State becomes first-class: a global `ctrl_state` (int-backed enum, `restore_value: true`) plus a `text_sensor` for HA/web display. **Never** inferred from the setpoint.
+
+```
+                 sensors clear + dwell met
+        ┌──────────────────────────────────────┐
+        v                                      │
+     IDLE ──── any trigger ────> BOOST ────────┘
+        ^                          │ release condition met
+        │                          v
+        └──── hold expired ───── HOLD
+        │
+     FAULT  <── stale/NaN from any state; exits to IDLE on recovery
+     MANUAL <── mode != AUTO from any state; on return to AUTO, enter IDLE
+```
+
+- `MANUAL` is a state, not a flag — "what is the controller doing" is answerable from one variable.
+- Setpoint is a **function of (state, profile)**, computed fresh each evaluation: `IDLE→low`, `BOOST→high[profile]`, `HOLD→hold[profile]`, `FAULT→low`, `MANUAL→mode map`. A day/night rollover changes the *speed* without changing the *state* — defect #3 eliminated by construction, not patched.
+- `auto_mode_active` global is deleted (it was a local variable wearing a global's costume — written and read only within one lambda invocation).
+- `current_target_speed` is retained only as "last commanded PWM" bookkeeping, never as a decision input.
+
+### 2. Time source and timers
+
+- Add `time: - platform: sntp` (id `sntp_time`, pool servers) **alongside** the existing `homeassistant_time`. SNTP survives HA loss; HA time survives a no-internet LAN. Either source alone satisfies the autonomy requirement.
+- Every wall-clock read goes through a guard helper that checks `now.is_valid()` on the preferred source, falls back to the other, and returns a validity flag.
+- **All durations move to monotonic `millis()`** — hold, cooldown, dwell, staleness. These need only elapsed time and must not depend on wall clock at all. This single change is what makes the controller time-source-independent for everything except the day/night profile.
+- Wall clock is needed for exactly one thing: day/night profile selection. With no valid time: use the **DAY profile** (higher ventilation — safety over quietness) and expose a `time_valid` diagnostic binary_sensor so the degradation is visible.
+
+### 3. Hysteresis + dwell (defaults — see open questions for confirmation)
+
+Separate assert/release thresholds per sensor, plus a minimum dwell in BOOST before release is allowed.
+
+| Signal | Boost when | Release when |
+|---|---|---|
+| CO₂ | > 800 ppm | < 700 ppm |
+| VOC index | > 150 | < 120 |
+| NOx index | > 5 | < 3 |
+| RH absolute | > 60 % | < 55 % |
+| dRH/dt (shower) | ≥ +3 %RH over 5 min | < +1 %RH over 5 min **and** RH < baseline + 3 % |
+
+- `any_high` becomes a set of latched per-signal booleans, each with its own assert/release edge. BOOST is held while *any* latch is set.
+- Minimum dwell in BOOST: 60 s. Hold duration stays 300 s.
+- dRH/dt uses a small ring buffer of RH samples in the header (5 min window at 30 s cadence = 10 slots) — cheap, no extra components.
+
+### 4. Presentation vs. control input (decoupling filters)
+
+Physical sensors become the **control** path: no `delta`, no `throttle_average` — only a light `median` / `sliding_window_moving_average`, a control-appropriate noise filter that doesn't introduce reporting latency. HA presentation moves to separate `platform: copy` sensors that carry the old display filters.
+
+Pattern (applied to RH, VOC, NOx, CO₂):
+
+```yaml
+# control input — internal, unthrottled
+humidity:
+  id: sht4x_air_humidity
+  internal: true
+  filters: [ {median: {window_size: 3}} ]
+  on_value: [ script.execute: evaluate_air_quality ]
+
+# HA presentation — carries the old display filters and the old name
+- platform: copy
+  source_id: sht4x_air_humidity
+  name: "SHT4x Humidity"
+  filters: [ {delta: 2%}, {throttle_average: 30s} ]
+```
+
+Keeping the original `name:` on the copy preserves the HA `entity_id`, so dashboards and Homebridge do not break. Verify per entity during implementation.
+
+### 5. Logic extraction to a C++ header
+
+`include/orcon_controller.h`, header-only, wired in via `esphome: includes: [include/orcon_controller.h]`. Chosen over a full external component because it's a much smaller step and keeps the single-file YAML workflow; an external component remains a documented future option.
+
+The header must be **ESPHome-free** so it compiles standalone on the host:
+
+```cpp
+struct OrconInputs  { float voc, co2, rh, nox; bool voc_ok, co2_ok, rh_ok, nox_ok;
+                      uint32_t now_ms; int hour; bool time_valid; OrconMode mode; };
+struct OrconOutputs { int  target_speed; OrconState state; bool fault;
+                      const char *reason; bool speed_changed; };
+class OrconController { public: OrconOutputs update(const OrconInputs &in); /* + config struct */ };
+```
+
+YAML keeps exactly one lambda per trigger: gather inputs → `update()` → apply `target_speed` to the fan, `state`/`reason` to text_sensors, `fault` to the binary_sensor. No decisions live in YAML.
+
+Host tests: `test/test_controller.cpp` plus a one-line `g++` invocation (or a tiny Makefile). Cases to cover: hold actually lasts 300 s (regression test for defect #2), day↔night rollover does not reset state (defect #3), NaN → FAULT → recovery, hysteresis does not oscillate at threshold ± noise, manual round-trip.
+
+### 6. Diagnostics
+
+- **Tacho**: map commanded % → expected RPM band (linear, with tolerance) from calibration data; suppress checks for a grace window (~20 s) after any speed change; raise `fan_fault` when actual RPM is outside the band, or when RPM > 0 while commanded speed is 0. **Requires calibration data first** — see open questions.
+- **Cross-check**: SHT4x vs. SCD4x humidity and temperature. Sustained divergence beyond a margin → `sensor_disagreement` flag.
+- **Staleness**: per control sensor, track ms since last valid update; beyond timeout → that input is `!ok` → FAULT path.
+- New entities: `text_sensor` controller_state + last_decision_reason; `binary_sensor` problem (device_class `problem`), time_valid, fan_fault; `sensor` commanded_speed.
+
+---
+
+## Implementation steps (ordered)
+
+**Step 0 — write deliverables (this task).** `.plan` and `TODO.md`. Nothing else.
+
+**Step 1 — unblock and stop the bleeding.** Create `orcon.yaml` in the root from the reference. Remove `trigger_source:` from the interval trigger (defect #1) — the parameter is unused inside the script, so deletion beats declaring it. Move `id(fan_hold_until) = 0;` inside the expiry branch (defect #2). Move the `last_evaluation_time` write to after the NaN check (defect #12). Verify with `esphome config orcon.yaml`. This step alone is small enough to flash and live with immediately.
+
+**Step 2 — time source.** Add SNTP, add the validity guard, convert hold/cooldown/dwell to `millis()`, add the `time_valid` diagnostic (defect #4).
+
+**Step 3 — state machine, still inline.** Introduce `ctrl_state`, derive setpoint from (state, profile), delete `auto_mode_active`, remove the now-obsolete clean-start speed-set check, add the state text_sensor (defect #3).
+
+**Step 4 — persistence and boot.** `restore_value: true` on the select and on the globals; replace the forced `select.set: AUTO` with restore-or-AUTO; route the boot fan command through the controller so bookkeeping stays consistent (defects #11, #13).
+
+**Step 5 — extract to header.** Move logic to `include/orcon_controller.h` with the pure-function shape above; YAML becomes wiring only. Add host tests, starting with regression tests for Steps 1–4 (defect #10).
+
+**Step 6 — split filters.** Physical sensors → internal control inputs; `copy` sensors → HA presentation. Confirm entity_ids are unchanged (defect #8).
+
+**Step 7 — hysteresis, dwell, dRH/dt.** Per-signal latches, RH ring buffer, shower detection (defects #6, #7). Extend host tests.
+
+**Step 8 — fail-safe.** Staleness timers, FAULT state, `problem` binary_sensor, forced idle while faulted (defect #5).
+
+**Step 9 — tacho + cross-check diagnostics.** Preceded by a calibration run (defect #9).
+
+**Step 10 — documentation.** Rewrite `FUNCTIONAL-SPEC.md` against the new behaviour; mark `REFERENCE-IMPLEMENTATION.md` as describing the frozen reference only; fix `README.md`'s stale references and framing.
+
+Steps 1–4 are each independently flashable and safe to run on the physical unit. Steps 5 and later should land together per step, with tests passing before flashing.
+
+---
+
+## Open questions (settle before building past Step 4)
+
+1. **Hysteresis margins** — are the release thresholds above (CO₂ 700, VOC 120, NOx 3, RH 55) acceptable, or is there field data suggesting different values?
+2. **Shower detection** — is +3 %RH / 5 min the right trigger for the bathroom in question, and should a shower-triggered boost use a *longer* hold than the generic 300 s?
+3. **Tacho calibration** — RPM readings at commanded 0/15/25/30/35/40/55/85% are needed before Step 9 can produce a meaningful band. Run a logging pass first, or ship Step 9 in "learn and report only" mode initially?
+4. **Night idle** — should AUTO idle stay at 15% at night, or drop lower/off?
+5. **Day/night boundaries** — keep the fixed 22:00/07:00 schedule, or follow sunset/sunrise (which would reintroduce a dependency on a valid clock + location)?
+6. **HA entity renaming** — Step 6 assumes entity_ids must not change. Confirm, or say if a one-time rename is acceptable.
+7. **Staleness timeout** — 5 minutes before declaring a sensor dead, or longer given the 30 s sensor update interval?
+8. **External component** — is that ambition (from README) still alive after the header extraction, or is the header the intended end state?
+
+---
+
+## Verification
+
+- **Step 1 gate:** `esphome config orcon.yaml` succeeds — proves defect #1 is dead.
+- **Host tests** (from Step 5): `g++ -std=c++17 test/test_controller.cpp -o /tmp/t && /tmp/t` — the hold-duration and rollover cases must never regress.
+- **On device:** flash, watch the DEBUG log through the web GUI. Trigger BOOST (e.g. breathe on the CO₂ sensor), confirm it stays in BOOST, then confirm HOLD lasts a full 300 s before dropping to IDLE. Cross 22:00 while in HOLD and confirm the speed changes but the state does not.
+- **Autonomy test — the important one:** stop Home Assistant entirely. Confirm the log shows a valid time from SNTP, AUTO evaluations keep running, the day/night profile is still correct, and mode changes made in the ESPHome web GUI still take effect.
+- **Fail-safe test:** unplug the I²C sensor bus. Confirm FAULT within the staleness timeout, the `problem` entity turns on, and the fan sits at 15% rather than freezing.

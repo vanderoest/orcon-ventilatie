@@ -6,7 +6,9 @@ This project replaces the original Orcon controller PCB with an ESP32 while pres
 
 The controller provides fully autonomous ventilation based on indoor air quality while remaining fully integrated with Home Assistant, Apple HomeKit and the built-in ESPHome web interface.
 
-The controller continues to operate autonomously even when Home Assistant is unavailable.
+The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `FUNCTIONAL-SPEC.md`.
+
+**Current version: 2.0.0.** See `CHANGELOG.md` for what changed from v1.0.
 
 ---
 
@@ -28,6 +30,10 @@ The controller continues to operate autonomously even when Home Assistant is una
 * OTA firmware updates
 * Fan RPM monitoring
 * Extensive diagnostic logging
+* Hysteresis + minimum dwell (no threshold pumping)
+* Dual time source (Home Assistant + SNTP), safe degradation if both are unavailable
+* Fail-safe FAULT state on stale/invalid sensors (fan keeps running at a fixed idle speed)
+* State and last-selected mode persist across reboot
 
 ---
 
@@ -46,18 +52,15 @@ The controller continues to operate autonomously even when Home Assistant is una
 
 # Project Goals
 
-The current implementation is a functional ESPHome YAML configuration.
-
-The goal of this repository is to evolve that implementation into a clean, modular and maintainable controller while preserving the existing behaviour.
+v1.0 (`docs/orcon-reference.yaml`) was a functional but defective single-file ESPHome YAML — see `.plan` § Defect register. v2.0.0 is a **repair**, not a preservation exercise: known defects are fixed and explicit autonomy/fail-safe guarantees are added, while control decision logic moves out of YAML into a testable C++ header.
 
 Long-term objectives include:
 
-* Improved software architecture
-* Better separation of concerns
-* Reduced inline C++ code
-* Reusable controller logic
-* An ESPHome external component
-* YAML-first configuration
+* Reduced inline C++ code in YAML (done in v2.0.0 — see `include/orcon_controller.h`)
+* Reusable, host-testable controller logic (done — see `test/test_controller.cpp`)
+* An ESPHome external component (still a documented future option, not built yet)
+* Proportional CO₂ control (documented future option, not built yet)
+* Commanded-vs-actual RPM fault detection (blocked on a calibration pass — see `FUNCTIONAL-SPEC.md` § Known Gaps)
 
 ---
 
@@ -65,37 +68,55 @@ Long-term objectives include:
 
 ```text
 .
+├── orcon.yaml                    # Live configuration (v2.0.0)
+├── include/
+│   └── orcon_controller.h        # Controller decision logic, ESPHome-free, host-testable
+├── test/
+│   └── test_controller.cpp       # Host regression tests (g++, no hardware)
 ├── docs/
-│   └── orcon_reference.yaml      # Original reference implementation
-├── external_components/          # Future reusable ESPHome component
+│   └── orcon-reference.yaml      # Frozen v1.0 reference — never edited again
+├── .plan                         # Design record for the v1.0 -> v2.0.0 repair
+├── TODO.md                       # Executable checklist derived from .plan
+├── CHANGELOG.md
+├── FUNCTIONAL-SPEC.md            # Behavioural spec for orcon.yaml (v2.0.0)
+├── REFERENCE-IMPLEMENTATION.md   # Historical: describes docs/orcon-reference.yaml only
 ├── README.md
-├── ARCHITECTURE.md
-├── CLAUDE.md
-└── TODO.md
+└── CLAUDE.md
 ```
 
 ---
 
 # Design Philosophy
 
-This project follows a few simple principles:
-
-* Preserve existing behaviour.
-* Refactor before redesigning.
-* Keep hardware and controller logic separated.
-* Prefer declarative ESPHome YAML where practical.
-* Keep custom C++ reusable and hardware-independent.
-* Build towards a reusable ESPHome external component.
-
-See `ARCHITECTURE.md` for the complete design principles.
+* One source of truth: no control logic duplicated into HA automations.
+* The ESP32 is autonomous by construction — HA/HomeKit are a layer on top, never a precondition.
+* Decisions live in `include/orcon_controller.h`; YAML is wiring only (gather inputs → `update()` → apply outputs).
+* Fail safe, not fail silent: a stale sensor forces a known-safe fan speed and raises a diagnostic, never freezes control.
+* Keep custom C++ reusable and hardware-independent (host-compilable, no ESPHome/Arduino includes).
 
 ---
 
 # Current Status
 
-The existing ESPHome YAML located in `docs/` is considered the functional reference implementation.
+`orcon.yaml` (repo root) is the live configuration, version 2.0.0. `docs/orcon-reference.yaml` is frozen at v1.0 and kept only as historical reference — see `REFERENCE-IMPLEMENTATION.md`.
 
-All refactoring work should reproduce the behaviour of this implementation before introducing new functionality.
+Open items not yet built: commanded-vs-actual fan RPM fault detection (needs a calibration pass) and an ESPHome external component. See `FUNCTIONAL-SPEC.md` § Known Gaps and `TODO.md`.
+
+---
+
+# Building and Flashing
+
+```sh
+cp secrets.yaml.example secrets.yaml   # fill in real wifi/api/ota/web credentials; gitignored
+esphome config orcon.yaml              # validate
+esphome run orcon.yaml                 # compile and flash
+```
+
+Host-run the controller logic tests (no hardware, no ESPHome):
+
+```sh
+make -C test
+```
 
 ---
 

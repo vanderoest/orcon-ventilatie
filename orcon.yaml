@@ -1,0 +1,523 @@
+esphome:
+  name: orcon
+  friendly_name: Orcon
+  project:
+    name: "arjan.orcon-controller"
+    version: "2.0.0"
+  includes:
+    - include/orcon_controller.h
+  on_boot:
+    then:
+      - delay: 15s
+      # Load tunables from YAML substitutions into the controller (single
+      # source of truth for thresholds/speeds/timing, same workflow as
+      # v1.0), then restore last state/speed from flash before the first
+      # evaluation. Fan writes at boot go through the controller like any
+      # other evaluation — no more direct fan.turn_on bypassing bookkeeping.
+      - lambda: |-
+          orcon::Config cfg;
+          cfg.co2_assert = ${co2_assert};
+          cfg.co2_release = ${co2_release};
+          cfg.voc_assert = ${voc_assert};
+          cfg.voc_release = ${voc_release};
+          cfg.nox_assert = ${nox_assert};
+          cfg.nox_release = ${nox_release};
+          cfg.rh_assert = ${humidity_assert};
+          cfg.rh_release = ${humidity_release};
+          cfg.shower_rate_assert_pct = ${shower_rate_assert};
+          cfg.shower_rate_release_pct = ${shower_rate_release};
+          cfg.shower_release_margin_pct = ${shower_release_margin};
+          cfg.speed_idle = ${fan_speed_low};
+          cfg.speed_high_day = ${fan_speed_high_day};
+          cfg.speed_high_night = ${fan_speed_high_night};
+          cfg.speed_hold_day = ${fan_speed_hold_day};
+          cfg.speed_hold_night = ${fan_speed_hold_night};
+          cfg.speed_fault = ${fan_speed_low};
+          cfg.speed_uit = ${manual_uit};
+          cfg.speed_rust = ${manual_rust};
+          cfg.speed_laag = ${manual_laag};
+          cfg.speed_medium = ${manual_medium};
+          cfg.speed_hoog = ${manual_hoog};
+          cfg.night_start_hour = ${night_mode_start};
+          cfg.night_end_hour = ${night_mode_end};
+          cfg.hold_ms = ${hold_time_ms};
+          cfg.boost_min_dwell_ms = ${boost_min_dwell_ms};
+          cfg.cooldown_ms = ${cooldown_ms};
+          cfg.staleness_timeout_ms = ${staleness_timeout_ms};
+          orcon::instance().configure(cfg);
+          orcon::instance().seed(
+              static_cast<orcon::State>(id(ctrl_state)),
+              id(current_target_speed));
+      - script.execute: evaluate_air_quality
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Orcon_Fallback"
+    password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+  auth:
+    type: digest
+    username: !secret web_username
+    password: !secret web_password
+  version: 3
+
+captive_portal:
+
+# Two independent time sources: HA survives a no-internet LAN, SNTP survives
+# HA being down. Either one satisfies the autonomy requirement; the guard in
+# evaluate_air_quality below prefers HA, falls back to SNTP, and flags
+# validity via time_valid_binary_sensor.
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+  - platform: sntp
+    id: sntp_time
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
+
+substitutions:
+  # Day/night schedule (unchanged from v1.0; open question 5 left
+  # unresolved by the user, so the existing fixed schedule stands).
+  night_mode_start: "22"
+  night_mode_end: "7"
+
+  # Hysteresis: assert (enter BOOST) / release (allow BOOST to end) per
+  # signal. Assert values are v1.0's original single thresholds, unchanged.
+  # Release values are new in v2.0.0 (.plan §3); open question 1 was left
+  # unresolved by the user, so the plan's own defaults stand.
+  voc_assert: "150"
+  voc_release: "120"
+  co2_assert: "800"
+  co2_release: "700"
+  humidity_assert: "60"
+  humidity_release: "55"
+  nox_assert: "5"
+  nox_release: "3"
+
+  # Shower (dRH/dt) detection, new in v2.0.0 (.plan §3). Open question 2 was
+  # left unresolved by the user; plan defaults stand, no separate longer
+  # hold for shower-triggered boosts (not in the reference implementation).
+  shower_rate_assert: "3.0"     # %RH rise within the 5-minute window
+  shower_rate_release: "1.0"
+  shower_release_margin: "3.0"  # RH must also fall back within baseline + this
+
+  # Fan speeds in AUTO mode (%). Unchanged from v1.0. Open question 4 (night
+  # idle) left unresolved: v1.0 has one idle speed with no night-specific
+  # value, so that is preserved as-is.
+  fan_speed_high_day: "40"
+  fan_speed_high_night: "30"
+  fan_speed_hold_day: "35"
+  fan_speed_hold_night: "25"
+  fan_speed_low: "15"
+
+  # Fan speeds in manual mode (%). Unchanged from v1.0.
+  manual_uit: "0"
+  manual_rust: "15"
+  manual_laag: "35"
+  manual_medium: "55"
+  manual_hoog: "85"
+
+  # Timing. hold_time_ms and cooldown_ms are v1.0's hold_time_seconds/
+  # cooldown_seconds converted to milliseconds (all durations are now
+  # monotonic millis(), never wall-clock — .plan §2). boost_min_dwell_ms is
+  # new in v2.0.0. staleness_timeout_ms is new (open question 7, left
+  # unresolved: reuses v1.0's existing 300s hold constant as the budget).
+  hold_time_ms: "300000"
+  boost_min_dwell_ms: "60000"
+  cooldown_ms: "30000"
+  staleness_timeout_ms: "300000"
+
+  # Sensor cross-check margins (new in v2.0.0 diagnostics, .plan §6). No
+  # v1.0 precedent exists for these; picked from typical sensor tolerance.
+  humidity_disagreement_margin: "15"
+  temperature_disagreement_margin: "3"
+
+globals:
+  - id: ctrl_state
+    type: int
+    restore_value: true
+    initial_value: '0'   # orcon::State::IDLE
+  - id: current_target_speed
+    type: int
+    restore_value: true
+    initial_value: '15'
+  - id: voc_last_valid_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: co2_last_valid_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: rh_last_valid_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: nox_last_valid_ms
+    type: uint32_t
+    initial_value: '0'
+
+# Select function for manual control in Home Assistant and HomeKit (exported via HomeBridge)
+select:
+  - platform: template
+    name: "Manual Control"
+    id: ventilation_manual_control
+    optimistic: true
+    restore_value: true
+    options:
+      - "UIT"
+      - "AUTO"
+      - "RUST"
+      - "LAAG"
+      - "MEDIUM"
+      - "HOOG"
+    initial_option: "AUTO"   # fallback only; restore_value wins once a prior state exists
+    icon: "mdi:fan"
+
+    on_value:
+      - logger.log:
+          format: "Manual control changed to: %s"
+          args: ['x.c_str()']
+          level: INFO
+      - script.execute: evaluate_air_quality
+
+text_sensor:
+  - platform: template
+    name: "Controller State"
+    id: controller_state_text
+    icon: "mdi:state-machine"
+
+  - platform: template
+    name: "Last Decision Reason"
+    id: last_decision_reason_text
+    icon: "mdi:text-box-outline"
+
+binary_sensor:
+  - platform: template
+    name: "Problem"
+    id: problem_binary_sensor
+    device_class: problem
+
+  - platform: template
+    name: "Time Valid"
+    id: time_valid_binary_sensor
+
+  - platform: template
+    name: "Sensor Disagreement"
+    id: sensor_disagreement_binary_sensor
+    device_class: problem
+
+status_led:
+  pin:
+    number: GPIO33
+
+# From V1.4.0 The Sensor pins on the Open AIR Mini are swapped. Correct example is below:
+
+uart:
+#UART For Sensor 2
+  - rx_pin: GPIO13
+    tx_pin: GPIO12
+    baud_rate: 9600
+    id: uart_sensor_2
+#UART For Sensor 1
+  - rx_pin: GPIO25
+    tx_pin: GPIO26
+    baud_rate: 9600
+    id: uart_sensor_1
+
+i2c:
+#I2C For Sensor 2
+  - id: i2c_sensor_2
+    sda: GPIO19
+    scl: GPIO18
+    scan: false
+    frequency: 400kHz
+#I2C For Sensor 1
+  - id: i2c_sensor_1
+    sda: GPIO16
+    scl: GPIO4
+    scan: false
+    frequency: 400kHz
+
+script:
+  - id: evaluate_air_quality
+    mode: single
+    then:
+      - lambda: |-
+          using namespace orcon;
+
+          // --- time: prefer HA time, fall back to SNTP, flag validity ---
+          auto ha_now = id(homeassistant_time).now();
+          auto sntp_now = id(sntp_time).now();
+          ESPTime now = ha_now;
+          bool time_valid = ha_now.is_valid();
+          if (!time_valid) {
+            now = sntp_now;
+            time_valid = sntp_now.is_valid();
+          }
+          id(time_valid_binary_sensor).publish_state(time_valid);
+
+          // --- mode ---
+          std::string mode_str = std::string(id(ventilation_manual_control).current_option());
+          Mode mode = Mode::AUTO;
+          if (mode_str == "UIT") mode = Mode::UIT;
+          else if (mode_str == "RUST") mode = Mode::RUST;
+          else if (mode_str == "LAAG") mode = Mode::LAAG;
+          else if (mode_str == "MEDIUM") mode = Mode::MEDIUM;
+          else if (mode_str == "HOOG") mode = Mode::HOOG;
+
+          // --- sensor inputs + staleness/NaN check ---
+          Inputs in;
+          in.now_ms = millis();
+          in.hour = time_valid ? now.hour : 0;
+          in.time_valid = time_valid;
+          in.mode = mode;
+
+          in.voc = id(sgp4x_voc_index).state;
+          in.co2 = id(scd4x_co2).state;
+          in.rh  = id(sht4x_air_humidity).state;
+          in.nox = id(sgp4x_nox_index).state;
+
+          uint32_t stale_ms = ${staleness_timeout_ms};
+          if (!isnan(in.voc)) id(voc_last_valid_ms) = in.now_ms;
+          if (!isnan(in.co2)) id(co2_last_valid_ms) = in.now_ms;
+          if (!isnan(in.rh))  id(rh_last_valid_ms)  = in.now_ms;
+          if (!isnan(in.nox)) id(nox_last_valid_ms) = in.now_ms;
+
+          in.voc_ok = !isnan(in.voc) && (in.now_ms - id(voc_last_valid_ms) < stale_ms);
+          in.co2_ok = !isnan(in.co2) && (in.now_ms - id(co2_last_valid_ms) < stale_ms);
+          in.rh_ok  = !isnan(in.rh)  && (in.now_ms - id(rh_last_valid_ms)  < stale_ms);
+          in.nox_ok = !isnan(in.nox) && (in.now_ms - id(nox_last_valid_ms) < stale_ms);
+
+          Outputs out = orcon::instance().update(in);
+
+          // --- apply to hardware, only on change (mirrors v1.0's guard) ---
+          if (out.speed_changed) {
+            if (out.target_speed <= 0) {
+              auto call = id(fan_motor).make_call();
+              call.set_state(false);
+              call.perform();
+            } else {
+              auto call = id(fan_motor).turn_on();
+              call.set_speed(out.target_speed);
+              call.perform();
+            }
+          }
+          id(current_target_speed) = out.target_speed;
+          id(ctrl_state) = static_cast<int>(out.state);
+
+          id(controller_state_text).publish_state(orcon::state_name(out.state));
+          id(last_decision_reason_text).publish_state(out.reason);
+          id(problem_binary_sensor).publish_state(out.fault);
+          id(commanded_speed_sensor).publish_state(out.target_speed);
+
+          ESP_LOGI("air_quality", "state=%s speed=%d reason=%s (voc=%.0f co2=%.0f rh=%.0f nox=%.0f)",
+                   orcon::state_name(out.state), out.target_speed, out.reason,
+                   in.voc, in.co2, in.rh, in.nox);
+
+          // --- diagnostics: SHT4x vs SCD4x cross-check (Step 9) ---
+          float scd_rh = id(scd4x_humidity).state;
+          float scd_t = id(scd4x_temperature).state;
+          float sht_t = id(sht4x_air_temperature).state;
+          bool disagreement = false;
+          if (!isnan(in.rh) && !isnan(scd_rh) && fabs(in.rh - scd_rh) > ${humidity_disagreement_margin})
+            disagreement = true;
+          if (!isnan(sht_t) && !isnan(scd_t) && fabs(sht_t - scd_t) > ${temperature_disagreement_margin})
+            disagreement = true;
+          id(sensor_disagreement_binary_sensor).publish_state(disagreement);
+
+sensor:
+
+  - platform: pulse_counter # reports the fan tacho. Diagnostic only for now
+    # (learn-and-report mode): commanded-vs-actual RPM banding needs a
+    # calibration pass this round didn't have data for (open question 3).
+    pin: GPIO14
+    unit_of_measurement: "rpm"
+    name: 'Fan Tacho'
+    id: orcon_rpm
+    update_interval: 5s
+
+  - platform: template
+    name: "Commanded Fan Speed"
+    id: commanded_speed_sensor
+    unit_of_measurement: "%"
+    icon: "mdi:fan-chevron-up"
+
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 30s
+    entity_category: "diagnostic"
+    device_class: "signal_strength"
+
+  - platform: copy # Reports the WiFi signal strength in %
+    source_id: wifi_signal_db
+    name: "WiFi Signal Percent"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+    unit_of_measurement: "%"
+    entity_category: "diagnostic"
+    device_class: "signal_strength"
+
+  - platform: sht4x
+    i2c_id: i2c_sensor_1
+    update_interval: 30s
+
+    temperature:
+      name: "SHT4x Temperature"
+      id: sht4x_air_temperature
+      accuracy_decimals: 2
+      state_class: measurement
+      device_class: temperature
+      # Not part of the control loop, presentation only (unchanged from v1.0).
+
+    humidity:
+      # Control input: internal, unthrottled, light noise filter only. HA
+      # presentation is the separate `copy` sensor below, which carries the
+      # old name/filters so the HA entity_id is unaffected (.plan §4).
+      id: sht4x_air_humidity
+      internal: true
+      accuracy_decimals: 2
+      state_class: measurement
+      device_class: humidity
+      filters:
+        - median:
+            window_size: 3
+      on_value:
+        - script.execute: evaluate_air_quality
+
+  - platform: copy
+    source_id: sht4x_air_humidity
+    name: "SHT4x Humidity"
+    accuracy_decimals: 2
+    state_class: measurement
+    device_class: humidity
+    filters:
+      - delta: 2%
+      - throttle_average: 30s
+
+  - platform: sgp4x
+    i2c_id: i2c_sensor_1
+    update_interval: 30s
+    compensation:
+      temperature_source: sht4x_air_temperature
+      humidity_source: sht4x_air_humidity
+
+    voc:
+      id: sgp4x_voc_index
+      internal: true
+      state_class: measurement
+      device_class: volatile_organic_compounds
+      filters:
+        - median:
+            window_size: 3
+      on_value:
+        - script.execute: evaluate_air_quality
+
+    nox:
+      id: sgp4x_nox_index
+      internal: true
+      state_class: measurement
+      device_class: nitrous_oxide
+      filters:
+        - median:
+            window_size: 3
+      on_value:
+        - script.execute: evaluate_air_quality
+
+  - platform: copy
+    source_id: sgp4x_voc_index
+    name: "SGP4x VOC Index"
+    state_class: measurement
+    device_class: volatile_organic_compounds
+    filters:
+      - delta: 5%
+      - throttle_average: 30s
+
+  - platform: copy
+    source_id: sgp4x_nox_index
+    name: "SGP4x NOx Index"
+    state_class: measurement
+    device_class: nitrous_oxide
+    filters:
+      - delta: 2%
+      - throttle_average: 30s
+
+  - platform: scd4x
+    i2c_id: i2c_sensor_1
+    update_interval: 30s
+
+    co2:
+      id: scd4x_co2
+      internal: true
+      state_class: measurement
+      device_class: carbon_dioxide
+      filters:
+        - median:
+            window_size: 3
+      on_value:
+        - script.execute: evaluate_air_quality
+
+    temperature:
+      name: "SCD4x Temperature"
+      id: scd4x_temperature
+      accuracy_decimals: 2
+      state_class: measurement
+      device_class: temperature
+      # Not part of the control loop; used only for the disagreement cross-check.
+
+    humidity:
+      name: "SCD4x Humidity"
+      id: scd4x_humidity
+      accuracy_decimals: 2
+      state_class: measurement
+      device_class: humidity
+      # Not part of the control loop; used only for the disagreement cross-check.
+
+  - platform: copy
+    source_id: scd4x_co2
+    name: "SCD4x CO2"
+    state_class: measurement
+    device_class: carbon_dioxide
+    filters:
+      - delta: 25
+      - throttle_average: 30s
+
+output:
+  - id: orcon_fan
+    platform: ledc
+    pin: GPIO15
+    inverted: true
+
+# Slow rise of values -due to the median filter- may not fire on_value, so
+# running every 2 minutes regardless. Unlike v1.0 (defect #1), no
+# trigger_source is passed — the script takes no parameters.
+interval:
+  - interval: 2min
+    then:
+      - script.execute: evaluate_air_quality
+
+fan:
+  - id: fan_motor
+    name: "Fan"
+    platform: speed
+    output: orcon_fan
