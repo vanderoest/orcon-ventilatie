@@ -309,6 +309,40 @@ static void test_first_evaluation_always_commands_fan() {
   CHECK(!out.speed_changed);
 }
 
+// orcon6.log regression: leaving MANUAL while the AUTO cooldown was still
+// active reported state=IDLE but kept commanding the *manual* speed (85%),
+// because the cooldown branch reused current_speed_ instead of deriving the
+// speed from the (now IDLE) state. The fan ran at 85% for ~24 s while the
+// controller claimed IDLE.
+static void test_manual_speed_does_not_leak_into_auto_cooldown() {
+  Controller c;
+  c.configure(Config());
+  uint32_t t = 0;
+
+  // A real AUTO evaluation, to arm the cooldown.
+  Inputs in = clean_auto_inputs(t);
+  Outputs out = c.update(in);
+  CHECK(out.state == State::IDLE);
+  CHECK(out.target_speed == 15);
+
+  // Manual HOOG a moment later (manual is never cooldown-gated).
+  t += 1000;
+  in = clean_auto_inputs(t);
+  in.mode = Mode::HOOG;
+  out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+  CHECK(out.target_speed == 85);
+
+  // Back to AUTO while still inside the 30 s cooldown window: state returns
+  // to IDLE, so the speed must be the IDLE speed, not the stale 85%.
+  t += 1000;
+  in = clean_auto_inputs(t);
+  out = c.update(in);
+  CHECK(out.state == State::IDLE);
+  CHECK(out.target_speed == 15);
+  CHECK(out.speed_changed);
+}
+
 static void test_seed_primes_hold_timer() {
   Controller c;
   Config cfg; // hold_ms = 300000
@@ -351,6 +385,7 @@ int main() {
   test_manual_to_auto_with_bad_sensors_enters_fault();
   test_update_is_noop_before_configure();
   test_first_evaluation_always_commands_fan();
+  test_manual_speed_does_not_leak_into_auto_cooldown();
   test_seed_primes_hold_timer();
   test_seed_primes_boost_dwell();
 

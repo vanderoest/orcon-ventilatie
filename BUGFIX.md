@@ -179,3 +179,17 @@ All four are worth having and they compose; they are not mutually exclusive. Lis
 **Why v2.0.1 made this deterministic:** before the boot-race fix (item 2, this document), the exact sequence of early evaluations before `configure()`/`seed()` ran was somewhat timing-dependent, so this could sometimes go unnoticed. With `configure()`/`seed()` now running first and deterministically at `on_boot` priority 800, the first real evaluation on every fresh install reliably computes `FAULT`/`15`, matching the seeded `15` every time — so the dormant defect became a guaranteed failure on first boot.
 
 **Fix:** `Controller` gained a `commanded_once_` flag. `speed_changed` is now `(target_speed != current_speed_) || !commanded_once_`, forcing exactly one real fan command on the first evaluation after `configure()`, regardless of whether the computed target happens to equal the seeded speed. Host-tested (`test_first_evaluation_always_commands_fan`).
+
+**Note on `orcon6.log`:** that log does *not* disprove the fix — it was captured from the **same binary as `orcon5.log`** (both report `compiled on 2026-08-05 13:22:57`), i.e. the device was rebooted but never reflashed. Its behaviour matches the unfixed code exactly. Item 9 remains unverified on hardware until a genuine reflash — `TODO.md` 6.5.
+
+---
+
+## 10. MANUAL speed leaks into AUTO during the cooldown window — FIXED
+
+**Source:** `orcon6.log`, 13:44:12 → 13:44:46. Selecting `HOOG` commanded the fan to 85%. Selecting `AUTO` ~10 s later produced `state=IDLE speed=85 reason=cooldown` — IDLE state, but still commanding the *manual* 85% speed. The tacho confirms the fan kept spinning at ~2496 rpm. It only dropped to 15% at 13:44:46, ~24 s later, when the cooldown finally expired and a real evaluation ran (the user had to select `AUTO` a second time). Independent of item 9 and of which binary was flashed.
+
+**Cause:** the cooldown branch in `Controller::update()` set `out.target_speed = current_speed_` — the last *commanded* value, which after a manual excursion is the manual speed. The `MANUAL → IDLE` reset immediately above it correctly updated `state_`, but the speed was then taken from the stale command rather than from the new state.
+
+This violates two documented invariants in `ARCHITECTURE.md`: "Setpoint is a function of (state, profile), recomputed each evaluation" and "FAULT and MANUAL transitions are never gated — a stale sensor or mode change takes effect immediately."
+
+**Fix:** the cooldown branch now uses `speed_for_state(state_, high_speed, hold_speed)`, so the commanded speed is always derived from the current state and day/night profile. This also fixes a latent variant of the same defect: a day/night rollover landing inside a cooldown window previously kept commanding the *old* profile's speed until the next real evaluation. Host-tested (`test_manual_speed_does_not_leak_into_auto_cooldown`).

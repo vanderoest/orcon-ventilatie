@@ -161,7 +161,13 @@ class Controller {
 
         if (cooling_down) {
           out.reason = "cooldown";
-          out.target_speed = current_speed_;
+          // Speed is always a function of (state, profile) — never the last
+          // commanded value. Reusing current_speed_ here leaked the MANUAL
+          // speed into AUTO: leaving MANUAL 85% during the cooldown window
+          // reported state=IDLE while the fan kept running at 85% until the
+          // cooldown expired (orcon6.log 13:44:22 → 13:44:46). It also
+          // pinned the old profile's speed across a day/night rollover.
+          out.target_speed = speed_for_state(state_, high_speed, hold_speed);
         } else {
           last_eval_ms_ = in.now_ms;
           evaluated_once_ = true;

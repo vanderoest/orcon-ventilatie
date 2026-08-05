@@ -158,6 +158,34 @@ never actually commanded.
 - [ ] **6.5** On device: fresh flash (or cleared restore values), confirm
       `'Fan' >> ON` and a non-zero tacho reading appear on the very first
       evaluation, without needing a manual mode switch first. **[HW]**
+      ⚠️ `orcon6.log` did **not** test this — it ran the same binary as
+      `orcon5.log` (identical `compiled on 2026-08-05 13:22:57` stamp), so
+      the device was rebooted, not reflashed. Confirm the build timestamp in
+      the boot log changes before drawing any conclusion.
+      Watch for a follow-on possibility: if `'Fan' >> ON Speed: 15` *does*
+      fire at boot but the tacho still reads 0, the fan lacks starting
+      torque at 15% duty from standstill and needs a kickstart pulse — a
+      separate, physical issue, not this bug. All observed 15% running data
+      so far (444–492 rpm) was measured while coasting down from a higher
+      speed, never from rest.
+
+---
+
+## Phase 7 — MANUAL speed leaking into AUTO during cooldown
+
+`BUGFIX.md` item 10. `orcon6.log` 13:44:22: `state=IDLE speed=85
+reason=cooldown` — IDLE state still commanding the manual 85% speed for
+~24 s, until the cooldown expired.
+
+- [x] **7.1** Add host test
+      `test_manual_speed_does_not_leak_into_auto_cooldown`. **[H]**
+- [x] **7.2** Cooldown branch: derive the speed via
+      `speed_for_state(state_, high_speed, hold_speed)` instead of reusing
+      `current_speed_`. **[H]**
+- [x] **7.3** Record in `BUGFIX.md` (item 10) and `CHANGELOG.md`. **[C]**
+- [ ] **7.4** On device: select a manual mode, return to AUTO within 30 s,
+      confirm the fan drops to the AUTO speed immediately rather than
+      holding the manual speed until the cooldown expires. **[HW]**
 
 ---
 
