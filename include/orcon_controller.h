@@ -177,7 +177,16 @@ class Controller {
     // Reports "control sensors are bad", independent of state — true in
     // MANUAL too, since MANUAL no longer implies sensors are fine.
     out.fault = any_bad;
-    out.speed_changed = (out.target_speed != current_speed_);
+    // The physical fan always boots off (orcon.yaml's restore_mode:
+    // ALWAYS_OFF), regardless of what current_speed_ was seeded to. Without
+    // this, a fresh boot whose first computed target (FAULT/IDLE, both
+    // speed_idle) happens to equal the seeded current_speed_ (also
+    // speed_idle) would never issue a real fan command — the software
+    // believes it's already at the right speed while the hardware sits off.
+    // Force exactly one real command on the first evaluation after
+    // configure(), regardless of whether the target matches current_speed_.
+    out.speed_changed = (out.target_speed != current_speed_) || !commanded_once_;
+    commanded_once_ = true;
     current_speed_ = out.target_speed;
     return out;
   }
@@ -187,6 +196,7 @@ class Controller {
 
   Config cfg_;
   bool configured_ = false;
+  bool commanded_once_ = false;
   State state_ = State::IDLE;
   int current_speed_ = 15;
   bool evaluated_once_ = false;

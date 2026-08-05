@@ -280,6 +280,35 @@ static void test_update_is_noop_before_configure() {
   CHECK(out.state == State::BOOST);
 }
 
+// orcon5.log regression: a fresh boot's default/seeded current_speed_ (15)
+// equals both the FAULT and IDLE speed (also 15), so target_speed ==
+// current_speed_ on the very first evaluation. Without forcing a command on
+// that first evaluation, the physical fan -- which always boots off,
+// orcon.yaml's restore_mode: ALWAYS_OFF -- was never actually commanded,
+// leaving the controller believing it was already running at 15% while the
+// hardware sat off indefinitely (until a manual mode picked a *different*
+// speed and finally issued a real command).
+static void test_first_evaluation_always_commands_fan() {
+  Controller c;
+  c.configure(Config()); // default Config: speed_idle == speed_fault == 15
+  uint32_t t = 0;
+
+  Inputs in = clean_auto_inputs(t);
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false; // boot sensor warm-up
+  Outputs out = c.update(in);
+  CHECK(out.state == State::FAULT);
+  CHECK(out.target_speed == 15);
+  CHECK(out.speed_changed); // must command the fan even though target == seeded speed
+
+  // Second evaluation at the same target speed must NOT re-command.
+  t += 1000;
+  in = clean_auto_inputs(t);
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  out = c.update(in);
+  CHECK(out.target_speed == 15);
+  CHECK(!out.speed_changed);
+}
+
 static void test_seed_primes_hold_timer() {
   Controller c;
   Config cfg; // hold_ms = 300000
@@ -321,6 +350,7 @@ int main() {
   test_uit_absolute_during_sensor_fault();
   test_manual_to_auto_with_bad_sensors_enters_fault();
   test_update_is_noop_before_configure();
+  test_first_evaluation_always_commands_fan();
   test_seed_primes_hold_timer();
   test_seed_primes_boost_dwell();
 

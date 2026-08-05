@@ -139,6 +139,28 @@ both touch those paths.
 
 ---
 
+## Phase 6 — Fan never actually started on a fresh boot (found in v2.0.1 rollout)
+
+`BUGFIX.md` item 9. `orcon5.log`: fan stayed physically off (0 rpm) from boot
+until a manual mode picked a speed different from the seeded default; the
+first real AUTO/FAULT evaluation computed the same speed (15%) as the seeded
+`current_speed_`, so `speed_changed` never fired and the ALWAYS_OFF fan was
+never actually commanded.
+
+- [x] **6.1** Add host test `test_first_evaluation_always_commands_fan`. **[H]**
+- [x] **6.2** Add `bool commanded_once_` to `Controller`; `speed_changed =
+      (target_speed != current_speed_) || !commanded_once_`, set
+      `commanded_once_ = true` alongside. **[H]**
+- [x] **6.3** Confirm full suite passes (`make -C test`) and `esphome config`
+      stays clean. **[H]/[C]**
+- [x] **6.4** Record the finding and fix in `BUGFIX.md` (item 9) and
+      `CHANGELOG.md` (v2.0.1). **[C]**
+- [ ] **6.5** On device: fresh flash (or cleared restore values), confirm
+      `'Fan' >> ON` and a non-zero tacho reading appear on the very first
+      evaluation, without needing a manual mode switch first. **[HW]**
+
+---
+
 ## No action required (tracked, deliberately not scheduled)
 
 - `fan_speed_high_day` (40 %) — ruled out as a cause by CO₂ and tacho evidence.

@@ -4,11 +4,14 @@ See chat history for the full walkthrough; this is the consolidated punch list.
 
 **Implementation status (v2.0.1, see `BUGFIX.plan` and `TODO.md`):** bugs #1
 and #2 are fixed and host-tested; recommendation #1 (`humidity_disagreement_margin`
-→ 10) is applied. This document is **not fully closed**: item 8 (seasonal
-baseline drift) is analysed but explicitly not implemented — it needs a design
-decision from the user before any code is written — and every `[HW]` item in
-`TODO.md` (on-device verification of #1, #2, #3, and the item-6 checklist)
-still needs a physical unit. See `TODO.md` for the exact checklist state.
+→ 10) is applied. First on-device boot of v2.0.1 surfaced a further defect —
+item 9 below, the fan never actually starting on a fresh boot — which is now
+also fixed and host-tested. This document is **not fully closed**: item 8
+(seasonal baseline drift) is analysed but explicitly not implemented — it
+needs a design decision from the user before any code is written — and every
+`[HW]` item in `TODO.md` (on-device verification of #1, #2, #3, #9, and the
+item-6 checklist) still needs a physical unit. See `TODO.md` for the exact
+checklist state.
 
 ---
 
@@ -164,3 +167,15 @@ All four are worth having and they compose; they are not mutually exclusive. Lis
 ### Suggested sequencing (if all four are wanted)
 
 1 and 2 first — they are self-contained, host-testable, and between them fix the observed failure and bound the worst case. 3 next, as a measurement upgrade that makes the thresholds more meaningful. 4 last, as an optional accuracy layer on top, gated behind a hard requirement that losing HA degrades cleanly back to 1–3.
+
+---
+
+## 9. Fan never actually started on a fresh boot — found during v2.0.1 rollout, FIXED
+
+**Source:** `orcon5.log`, first real-hardware boot of v2.0.1. From boot (13:24:13) until the user manually selected `HOOG` at 13:34:29 — over ten minutes — `Controller State` cycled `FAULT` → `IDLE` and `Commanded Fan Speed` read `15.0%` throughout, but `Fan Tacho` stayed at `0.00 rpm` the entire time and no `'Fan' >> ON` log line was ever emitted. The moment `HOOG` (85%) was selected, `'Fan' >> ON, Speed: 85` appeared immediately and the tacho confirmed real rotation; switching back to `AUTO` afterwards also worked (`'Fan' >> ON, Speed: 15`). This matches the report: "manual profiles work, back to automatic works" — only the untouched-since-boot AUTO/FAULT path was silently inert.
+
+**Cause:** `Controller::update()` only issues `out.speed_changed = true` (and thus only `orcon.yaml`'s `fan_motor.turn_on()`/`make_call()` fires) when the newly computed `target_speed` differs from `current_speed_`. On a fresh boot, `current_speed_` is seeded to `15` (the persisted global's `initial_value`), and the very first real evaluation — while sensors are still stabilizing — computes `state=FAULT`, `target_speed=speed_fault=15`. `15 == 15`, so `speed_changed` was false and the fan command was never issued. But `orcon.yaml`'s `fan_motor` is `restore_mode: ALWAYS_OFF` — the *physical* fan always boots off regardless of what `current_speed_` remembers — so the controller believed it was already running at 15% while the hardware sat off, indefinitely, until some later evaluation computed a genuinely different speed (here, a manual mode selection).
+
+**Why v2.0.1 made this deterministic:** before the boot-race fix (item 2, this document), the exact sequence of early evaluations before `configure()`/`seed()` ran was somewhat timing-dependent, so this could sometimes go unnoticed. With `configure()`/`seed()` now running first and deterministically at `on_boot` priority 800, the first real evaluation on every fresh install reliably computes `FAULT`/`15`, matching the seeded `15` every time — so the dormant defect became a guaranteed failure on first boot.
+
+**Fix:** `Controller` gained a `commanded_once_` flag. `speed_changed` is now `(target_speed != current_speed_) || !commanded_once_`, forcing exactly one real fan command on the first evaluation after `configure()`, regardless of whether the computed target happens to equal the seeded speed. Host-tested (`test_first_evaluation_always_commands_fan`).

@@ -126,6 +126,14 @@ on the header's hardcoded defaults or an unseeded state.
 
 The mode select restores its own last value via `restore_value`. With no restored value (first boot, or cleared/corrupt restore) it falls back to `AUTO` — not the unconditional forced AUTO of v1.0.
 
+The `fan_motor` output itself is `restore_mode: ALWAYS_OFF` — it always boots
+physically off, independent of `current_target_speed`'s restored value. To
+guarantee the hardware is actually brought in sync, `Controller::update()`
+forces exactly one real fan command on the first evaluation after
+`configure()`, even if the computed target happens to equal the seeded
+speed (`BUGFIX.md` #9 — this was previously silently skipped, leaving the
+fan off indefinitely on a fresh boot).
+
 ---
 
 ## Hysteresis and dwell (AUTO)
