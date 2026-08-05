@@ -87,12 +87,17 @@ class Controller {
 
   // Overrides the config (YAML substitutions are the source of truth on
   // device; defaults above are for host tests only).
-  void configure(const Config &cfg) { cfg_ = cfg; }
+  void configure(const Config &cfg) { cfg_ = cfg; configured_ = true; }
 
-  // Primes state/speed from restored (flash-persisted) values at boot.
-  void seed(State s, int speed) {
+  // Primes state/speed from restored (flash-persisted) values at boot, and
+  // primes the HOLD/BOOST timers relative to now_ms so a restored HOLD/BOOST
+  // doesn't immediately expire/release on the first evaluation. Call
+  // configure() first so cfg_.hold_ms reflects the YAML config, not defaults.
+  void seed(State s, int speed, uint32_t now_ms) {
     state_ = s;
     current_speed_ = speed;
+    hold_until_ms_ = now_ms + cfg_.hold_ms;
+    boost_entered_ms_ = now_ms;
   }
 
   State state() const { return state_; }
@@ -112,6 +117,19 @@ class Controller {
 
   Outputs update(const Inputs &in) {
     Outputs out;
+
+    // Not yet configured (boot ordering race, .plan §2): explicit no-op that
+    // cannot command the fan or mutate latches/cooldown. Returns before any
+    // other state is touched.
+    if (!configured_) {
+      out.state = state_;
+      out.target_speed = current_speed_;
+      out.reason = "not_configured";
+      out.speed_changed = false;
+      out.fault = false;
+      return out;
+    }
+
     const bool night = is_night(in);
     const int high_speed = night ? cfg_.speed_high_night : cfg_.speed_high_day;
     const int hold_speed = night ? cfg_.speed_hold_night : cfg_.speed_hold_day;
@@ -120,11 +138,10 @@ class Controller {
 
     const bool any_bad = !in.voc_ok || !in.co2_ok || !in.rh_ok || !in.nox_ok;
 
-    if (any_bad) {
-      state_ = State::FAULT;
-      out.reason = "sensor_stale_or_invalid";
-      out.target_speed = cfg_.speed_fault;
-    } else if (in.mode != Mode::AUTO) {
+    // Manual modes never read the sensors, so sensor validity must not block
+    // them (BUGFIX.md #1) — mode is checked before any_bad. any_bad only
+    // gates the AUTO path, below.
+    if (in.mode != Mode::AUTO) {
       state_ = State::MANUAL;
       out.reason = "manual_mode";
       out.target_speed = manual_speed(in.mode);
@@ -134,24 +151,32 @@ class Controller {
         clear_latches();
       }
 
-      const bool first = !evaluated_once_;
-      const bool cooling_down = !first && (in.now_ms - last_eval_ms_ < cfg_.cooldown_ms);
-
-      if (cooling_down) {
-        out.reason = "cooldown";
-        out.target_speed = current_speed_;
+      if (any_bad) {
+        state_ = State::FAULT;
+        out.reason = "sensor_stale_or_invalid";
+        out.target_speed = cfg_.speed_fault;
       } else {
-        last_eval_ms_ = in.now_ms;
-        evaluated_once_ = true;
-        evaluate_latches(in);
-        const bool any_high = co2_latch_ || voc_latch_ || nox_latch_ || rh_latch_ || shower_latch_;
-        out.reason = step_state(in.now_ms, any_high);
-        out.target_speed = speed_for_state(state_, high_speed, hold_speed);
+        const bool first = !evaluated_once_;
+        const bool cooling_down = !first && (in.now_ms - last_eval_ms_ < cfg_.cooldown_ms);
+
+        if (cooling_down) {
+          out.reason = "cooldown";
+          out.target_speed = current_speed_;
+        } else {
+          last_eval_ms_ = in.now_ms;
+          evaluated_once_ = true;
+          evaluate_latches(in);
+          const bool any_high = co2_latch_ || voc_latch_ || nox_latch_ || rh_latch_ || shower_latch_;
+          out.reason = step_state(in.now_ms, any_high);
+          out.target_speed = speed_for_state(state_, high_speed, hold_speed);
+        }
       }
     }
 
     out.state = state_;
-    out.fault = (state_ == State::FAULT);
+    // Reports "control sensors are bad", independent of state — true in
+    // MANUAL too, since MANUAL no longer implies sensors are fine.
+    out.fault = any_bad;
     out.speed_changed = (out.target_speed != current_speed_);
     current_speed_ = out.target_speed;
     return out;
@@ -161,6 +186,7 @@ class Controller {
   static constexpr int kRhHistorySlots = 10; // 5 min @ >=30s cadence
 
   Config cfg_;
+  bool configured_ = false;
   State state_ = State::IDLE;
   int current_speed_ = 15;
   bool evaluated_once_ = false;

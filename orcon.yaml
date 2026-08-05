@@ -7,48 +7,56 @@ esphome:
   includes:
     - include/orcon_controller.h
   on_boot:
-    then:
-      - delay: 15s
-      # Load tunables from YAML substitutions into the controller (single
-      # source of truth for thresholds/speeds/timing, same workflow as
-      # v1.0), then restore last state/speed from flash before the first
-      # evaluation. Fan writes at boot go through the controller like any
-      # other evaluation — no more direct fan.turn_on bypassing bookkeeping.
-      - lambda: |-
-          orcon::Config cfg;
-          cfg.co2_assert = ${co2_assert};
-          cfg.co2_release = ${co2_release};
-          cfg.voc_assert = ${voc_assert};
-          cfg.voc_release = ${voc_release};
-          cfg.nox_assert = ${nox_assert};
-          cfg.nox_release = ${nox_release};
-          cfg.rh_assert = ${humidity_assert};
-          cfg.rh_release = ${humidity_release};
-          cfg.shower_rate_assert_pct = ${shower_rate_assert};
-          cfg.shower_rate_release_pct = ${shower_rate_release};
-          cfg.shower_release_margin_pct = ${shower_release_margin};
-          cfg.speed_idle = ${fan_speed_low};
-          cfg.speed_high_day = ${fan_speed_high_day};
-          cfg.speed_high_night = ${fan_speed_high_night};
-          cfg.speed_hold_day = ${fan_speed_hold_day};
-          cfg.speed_hold_night = ${fan_speed_hold_night};
-          cfg.speed_fault = ${fan_speed_low};
-          cfg.speed_uit = ${manual_uit};
-          cfg.speed_rust = ${manual_rust};
-          cfg.speed_laag = ${manual_laag};
-          cfg.speed_medium = ${manual_medium};
-          cfg.speed_hoog = ${manual_hoog};
-          cfg.night_start_hour = ${night_mode_start};
-          cfg.night_end_hour = ${night_mode_end};
-          cfg.hold_ms = ${hold_time_ms};
-          cfg.boost_min_dwell_ms = ${boost_min_dwell_ms};
-          cfg.cooldown_ms = ${cooldown_ms};
-          cfg.staleness_timeout_ms = ${staleness_timeout_ms};
-          orcon::instance().configure(cfg);
-          orcon::instance().seed(
-              static_cast<orcon::State>(id(ctrl_state)),
-              id(current_target_speed));
-      - script.execute: evaluate_air_quality
+    # Split in two: configure()/seed() must run before anything can trigger
+    # an evaluation (a sensor's on_value, the select's restore_value), so it
+    # runs at an early priority, before WIFI/API and before other components'
+    # setup(). The delayed evaluation keeps its default priority so it still
+    # runs after hardware/Wi-Fi stabilization (BUGFIX.md #2).
+    - priority: 800
+      then:
+        # Load tunables from YAML substitutions into the controller (single
+        # source of truth for thresholds/speeds/timing, same workflow as
+        # v1.0), then restore last state/speed from flash before the first
+        # evaluation. Fan writes at boot go through the controller like any
+        # other evaluation — no more direct fan.turn_on bypassing bookkeeping.
+        - lambda: |-
+            orcon::Config cfg;
+            cfg.co2_assert = ${co2_assert};
+            cfg.co2_release = ${co2_release};
+            cfg.voc_assert = ${voc_assert};
+            cfg.voc_release = ${voc_release};
+            cfg.nox_assert = ${nox_assert};
+            cfg.nox_release = ${nox_release};
+            cfg.rh_assert = ${humidity_assert};
+            cfg.rh_release = ${humidity_release};
+            cfg.shower_rate_assert_pct = ${shower_rate_assert};
+            cfg.shower_rate_release_pct = ${shower_rate_release};
+            cfg.shower_release_margin_pct = ${shower_release_margin};
+            cfg.speed_idle = ${fan_speed_low};
+            cfg.speed_high_day = ${fan_speed_high_day};
+            cfg.speed_high_night = ${fan_speed_high_night};
+            cfg.speed_hold_day = ${fan_speed_hold_day};
+            cfg.speed_hold_night = ${fan_speed_hold_night};
+            cfg.speed_fault = ${fan_speed_low};
+            cfg.speed_uit = ${manual_uit};
+            cfg.speed_rust = ${manual_rust};
+            cfg.speed_laag = ${manual_laag};
+            cfg.speed_medium = ${manual_medium};
+            cfg.speed_hoog = ${manual_hoog};
+            cfg.night_start_hour = ${night_mode_start};
+            cfg.night_end_hour = ${night_mode_end};
+            cfg.hold_ms = ${hold_time_ms};
+            cfg.boost_min_dwell_ms = ${boost_min_dwell_ms};
+            cfg.cooldown_ms = ${cooldown_ms};
+            cfg.staleness_timeout_ms = ${staleness_timeout_ms};
+            orcon::instance().configure(cfg);
+            orcon::instance().seed(
+                static_cast<orcon::State>(id(ctrl_state)),
+                id(current_target_speed),
+                millis());
+    - then:
+        - delay: 15s
+        - script.execute: evaluate_air_quality
 
 esp32:
   board: esp32dev
@@ -151,7 +159,7 @@ substitutions:
 
   # Sensor cross-check margins (new in v2.0.0 diagnostics, .plan §6). No
   # v1.0 precedent exists for these; picked from typical sensor tolerance.
-  humidity_disagreement_margin: "15"
+  humidity_disagreement_margin: "10"
   temperature_disagreement_margin: "3"
 
 globals:

@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.0.1
+
+Bugfix round from field-log analysis. See `BUGFIX.md` for the findings and `BUGFIX.plan` for the implementation plan.
+
+### Fixed
+
+- **FAULT overriding MANUAL/UIT.** `Controller::update()` checked sensor validity before mode, so a manual selection (including `UIT`) made while any control sensor was stale/NaN was silently overridden to the FAULT idle speed. Mode is now checked first — manual modes never read the sensors and are never blocked by them. `Problem` now reports "control sensors are bad" independent of state (also visible while in MANUAL), rather than "state == FAULT" (`BUGFIX.md` #1).
+- **Boot-time config/seed race.** A sensor's `on_value` or the mode select's `restore_value` could trigger a real evaluation before `on_boot`'s `configure()`/`seed()` had run, evaluating against the header's hardcoded defaults and an unseeded state instead of the YAML config and the restored globals. `configure()`/`seed()` now run at `on_boot` priority 800, before Wi-Fi/API and other components' `setup()`; `Controller::update()` is additionally a no-op until `configure()` has run, as a fail-safe independent of ESPHome's priority ordering. `seed()` now also primes the HOLD/BOOST timers relative to `millis()` at boot, so a restored HOLD or BOOST doesn't immediately expire/release on the first evaluation (`BUGFIX.md` #2).
+
+### Changed
+
+- `humidity_disagreement_margin`: 15 → 10 points. Field data showed a stable 6–8.5 point gap between SHT4x and SCD4x; at 15 the `Sensor Disagreement` diagnostic could never fire for this sensor pairing (`BUGFIX.md` #3).
+
+### Not changed (analysed, no action)
+
+- `fan_speed_high_day` (40%) — ruled out as a cause of the observed long BOOST; CO₂ and tacho data confirm the fan was exchanging air correctly at commanded speed.
+- Shower release/HOLD/dwell cycle and the hysteresis dead-band holding BOOST between the RH assert/release thresholds — both confirmed working as designed on-device.
+
+### Known gap (design decision open, not implemented)
+
+- Fixed absolute RH thresholds (60%/55%) don't survive seasonal baseline drift — a shower BOOST ran for ≈3 hours in humid weather before a window was opened. See `BUGFIX.md` item 8 / `BUGFIX.plan` §8 for four candidate solutions; none is scheduled until the open questions there are decided.
+
 ## v2.0.0
 
 Repair round, not a redesign: fixes the defects found in v1.0 and adds the autonomy/fail-safe guarantees required going forward. See `.plan` for the full design record and defect register, `ARCHITECTURE.md` for the resulting system.

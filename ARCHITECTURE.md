@@ -72,15 +72,15 @@ State (`ctrl_state`) is one of five values, computed explicitly — **never** in
         │                                 v
         └──────── hold expired ───────── HOLD
 
-     FAULT  <── any input stale/NaN, from any state; -> IDLE on recovery
-     MANUAL <── mode != AUTO, from any state; -> IDLE when mode returns to AUTO
+     FAULT  <── any input stale/NaN, from IDLE/BOOST/HOLD while mode == AUTO; -> IDLE on recovery
+     MANUAL <── mode != AUTO, from any state, unconditionally; -> IDLE when mode returns to AUTO
 ```
 
 - **IDLE** — idle speed, waiting for a trigger.
 - **BOOST** — at least one signal latched high; day/night high speed.
 - **HOLD** — signals cleared and dwell elapsed; day/night hold speed until the hold timer expires, then → IDLE.
-- **FAULT** — any control sensor NaN or stale beyond timeout. Fan forced to idle speed. Exits to IDLE when all sensors are valid again.
-- **MANUAL** — mode select is not AUTO. Fan follows the mode's fixed speed. Returning to AUTO always re-enters at IDLE, never resuming a prior BOOST/HOLD.
+- **FAULT** — any control sensor NaN or stale beyond timeout, evaluated only in AUTO. Fan forced to idle speed. Exits to IDLE when all sensors are valid again.
+- **MANUAL** — mode select is not AUTO. Fan follows the mode's fixed speed regardless of sensor validity — manual selection is absolute and is never overridden by a sensor fault. Returning to AUTO always re-enters at IDLE, never resuming a prior BOOST/HOLD.
 
 Setpoint is a function of (state, profile), recomputed each evaluation. A day/night rollover, or a manual excursion and return, changes the **speed** a state maps to — never the **state**. Crossing 22:00 or 07:00 while in BOOST or HOLD changes commanded speed without restarting or resetting state.
 
@@ -99,16 +99,30 @@ Selected via `ventilation_manual_control`.
 | **MEDIUM** | 55%, fixed. |
 | **HOOG** | 85%, fixed. |
 
-Any non-AUTO mode is the MANUAL state: thresholds are not evaluated and the fan holds the mode's fixed speed regardless of air quality.
+Any non-AUTO mode is the MANUAL state: thresholds are not evaluated and the fan holds the mode's fixed speed regardless of air quality — including while control sensors are stale or invalid. Mode is checked before sensor validity, so a manual selection (including UIT) is never overridden by FAULT.
 
 ---
 
 ## Boot
 
-1. Delay 15 s for hardware stabilization.
-2. Load tunables from YAML substitutions into `Config`.
-3. Restore `ctrl_state` and `current_target_speed` from flash into the controller.
-4. Run one evaluation, which issues the first fan command through the same path as every other evaluation.
+`on_boot` runs in two priority-ordered stages so the controller cannot be
+evaluated against unconfigured, unseeded state (BUGFIX.md #2):
+
+1. **Priority 800** (before Wi-Fi/API, before other components' `setup()`):
+   load tunables from YAML substitutions into `Config`, restore `ctrl_state`
+   and `current_target_speed` from flash, and call `configure()`/`seed()` on
+   the controller. `seed()` also primes the HOLD/BOOST timers relative to the
+   current `millis()`, so a restored HOLD or BOOST doesn't immediately expire
+   or satisfy its dwell on the first evaluation.
+2. **Default priority**: delay 15 s for hardware stabilization, then run one
+   evaluation, which issues the first fan command through the same path as
+   every other evaluation.
+
+Belt-and-braces: `Controller::update()` is a no-op (`reason =
+"not_configured"`, no fan command, cooldown untouched) until `configure()`
+has run, so even if a sensor's `on_value` or the mode select's
+`restore_value` fires an evaluation before stage 1 completes, it cannot act
+on the header's hardcoded defaults or an unseeded state.
 
 The mode select restores its own last value via `restore_value`. With no restored value (first boot, or cleared/corrupt restore) it falls back to `AUTO` — not the unconditional forced AUTO of v1.0.
 
@@ -146,7 +160,7 @@ All durations — cooldown, dwell, hold, staleness — are measured on monotonic
 
 ## Fail-safe
 
-Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset on every non-NaN reading. If any sensor is NaN or its last valid reading is older than 5 minutes, the controller enters FAULT: fan forced to 15% rather than freezing at its last speed, and the `Problem` binary_sensor turns on. Recovery is automatic on the next evaluation once all four sensors are valid.
+Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset on every non-NaN reading. In AUTO, if any sensor is NaN or its last valid reading is older than 5 minutes, the controller enters FAULT: fan forced to 15% rather than freezing at its last speed. The `Problem` binary_sensor turns on whenever any control sensor is bad, independent of state — including while in MANUAL, where sensor validity has no effect on fan speed but is still worth surfacing as a diagnostic. Recovery is automatic on the next AUTO evaluation once all four sensors are valid.
 
 ---
 
@@ -169,7 +183,7 @@ This keeps display smoothing from degrading the control input, which in v1.0 sha
 | `Fan` | fan (speed) | The fan itself. |
 | `Controller State` | text_sensor | IDLE/BOOST/HOLD/FAULT/MANUAL. |
 | `Last Decision Reason` | text_sensor | Why the last evaluation acted as it did. |
-| `Problem` | binary_sensor (`problem`) | On while in FAULT. |
+| `Problem` | binary_sensor (`problem`) | On whenever any control sensor is bad, independent of state (so also on while in MANUAL). |
 | `Time Valid` | binary_sensor | Off when neither time source is valid. |
 | `Sensor Disagreement` | binary_sensor (`problem`) | SHT4x vs SCD4x humidity/temperature divergence. |
 | `Commanded Fan Speed` | sensor (%) | Controller output, for comparison against tacho. |
@@ -209,7 +223,7 @@ All tunables are YAML substitutions in `orcon.yaml`, loaded into `Config` at boo
 | `boost_min_dwell_ms` | 60000 | |
 | `cooldown_ms` | 30000 | |
 | `staleness_timeout_ms` | 300000 | |
-| `humidity_disagreement_margin` | 15 | points — see `BUGFIX.md`, likely too loose |
+| `humidity_disagreement_margin` | 10 | points — tuned from field data (SHT4x reads 6–8.5 points below SCD4x); see `BUGFIX.md` |
 | `temperature_disagreement_margin` | 3 | °C |
 
 Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value: true`). The four `*_last_valid_ms` staleness timers are runtime-only.
@@ -219,7 +233,7 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 ## Known gaps
 
 - **Commanded-vs-actual RPM fault detection** — needs a calibration pass (RPM at each commanded speed) that has not been run. `Fan Tacho` and `Commanded Fan Speed` are exposed for manual comparison; there is no `fan_fault` entity.
-- **Open defects** — see `BUGFIX.md` (FAULT overriding MANUAL/UIT; boot-time config/seed race).
+- **Seasonal baseline drift** — the fixed absolute RH latch (60%/55%) can hold BOOST for hours in humid weather; a design decision on the fix (adaptive baseline, boost duration cap, or both) is open. See `BUGFIX.md` item 8 / `BUGFIX.plan` §8. Not yet implemented.
 - **Proportional CO₂ control** and an **ESPHome external component** remain documented future options, not built.
 
 ---

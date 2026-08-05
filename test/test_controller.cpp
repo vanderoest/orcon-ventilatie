@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 static int g_failures = 0;
 
@@ -45,6 +46,7 @@ static Inputs clean_auto_inputs(uint32_t now_ms, int hour = 12) {
 // collapse to ~one evaluation cycle.
 static void test_hold_lasts_full_duration() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   // Trigger BOOST.
@@ -79,6 +81,7 @@ static void test_hold_lasts_full_duration() {
 // HOLD must change speed, not state.
 static void test_day_night_rollover_preserves_state() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   Inputs in = clean_auto_inputs(t, 21); // day
@@ -97,6 +100,7 @@ static void test_day_night_rollover_preserves_state() {
 
 static void test_nan_enters_fault_and_recovers() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   Inputs in = clean_auto_inputs(t);
@@ -115,6 +119,7 @@ static void test_nan_enters_fault_and_recovers() {
 
 static void test_hysteresis_no_oscillation_at_threshold() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   Inputs in = clean_auto_inputs(t);
@@ -134,6 +139,7 @@ static void test_hysteresis_no_oscillation_at_threshold() {
 
 static void test_shower_detection_fires_and_clears() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   // Baseline RH samples, spaced past the min sample interval.
@@ -162,6 +168,7 @@ static void test_shower_detection_fires_and_clears() {
 
 static void test_manual_roundtrip_returns_to_idle() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   Inputs in = clean_auto_inputs(t);
@@ -184,6 +191,7 @@ static void test_manual_roundtrip_returns_to_idle() {
 
 static void test_boost_min_dwell_blocks_early_release() {
   Controller c;
+  c.configure(Config());
   uint32_t t = 0;
 
   Inputs in = clean_auto_inputs(t);
@@ -198,6 +206,109 @@ static void test_boost_min_dwell_blocks_early_release() {
   CHECK(out.state == State::BOOST);
 }
 
+// BUGFIX.md #1 regressions: manual modes must never be overridden by FAULT.
+
+static void test_manual_overrides_fault() {
+  Controller c;
+  c.configure(Config());
+  uint32_t t = 0;
+
+  Inputs in = clean_auto_inputs(t);
+  in.mode = Mode::HOOG;
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+  CHECK(out.target_speed == 85);
+  CHECK(out.fault); // Problem still reports bad sensors, independent of state
+}
+
+static void test_uit_absolute_during_sensor_fault() {
+  Controller c;
+  c.configure(Config());
+  uint32_t t = 0;
+
+  Inputs in = clean_auto_inputs(t);
+  in.mode = Mode::UIT;
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+  CHECK(out.target_speed == 0);
+}
+
+static void test_manual_to_auto_with_bad_sensors_enters_fault() {
+  Controller c;
+  c.configure(Config());
+  uint32_t t = 0;
+
+  Inputs in = clean_auto_inputs(t);
+  in.mode = Mode::HOOG;
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+
+  // Back to AUTO while sensors are still bad: must (re-)enter FAULT, not
+  // resume a prior AUTO state, and latches must have been cleared exactly once.
+  t += 1000;
+  in = clean_auto_inputs(t);
+  in.mode = Mode::AUTO;
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  out = c.update(in);
+  CHECK(out.state == State::FAULT);
+  CHECK(out.target_speed == 15);
+}
+
+// BUGFIX.md #2 regressions: boot-time config/seed race.
+
+static void test_update_is_noop_before_configure() {
+  Controller c; // not configured
+  uint32_t t = 0;
+
+  Inputs in = clean_auto_inputs(t);
+  in.co2 = 2000; // would trigger BOOST if evaluated
+  Outputs out = c.update(in);
+  CHECK(out.state == State::IDLE);
+  CHECK(!out.speed_changed);
+  CHECK(strcmp(out.reason, "not_configured") == 0);
+
+  // configure() unblocks evaluation, and the gated call above must not have
+  // consumed the cooldown -- this evaluation must run for real.
+  c.configure(Config());
+  t += 1000;
+  in = clean_auto_inputs(t);
+  in.co2 = 900;
+  out = c.update(in);
+  CHECK(out.state == State::BOOST);
+}
+
+static void test_seed_primes_hold_timer() {
+  Controller c;
+  Config cfg; // hold_ms = 300000
+  c.configure(cfg);
+  uint32_t now = 100000;
+  c.seed(State::HOLD, 35, now);
+
+  // Immediately evaluate: hold must still be active, not expired, since the
+  // timer was primed forward from now, not left at zero.
+  Inputs in = clean_auto_inputs(now);
+  Outputs out = c.update(in);
+  CHECK(out.state == State::HOLD);
+  CHECK(strcmp(out.reason, "hold_active") == 0);
+}
+
+static void test_seed_primes_boost_dwell() {
+  Controller c;
+  Config cfg; // boost_min_dwell_ms = 60000
+  c.configure(cfg);
+  uint32_t now = 100000;
+  c.seed(State::BOOST, 40, now);
+
+  // Sensors clean immediately; dwell must block release since
+  // boost_entered_ms_ was primed to now, not left at zero.
+  Inputs in = clean_auto_inputs(now);
+  Outputs out = c.update(in);
+  CHECK(out.state == State::BOOST);
+}
+
 int main() {
   test_hold_lasts_full_duration();
   test_day_night_rollover_preserves_state();
@@ -206,6 +317,12 @@ int main() {
   test_shower_detection_fires_and_clears();
   test_manual_roundtrip_returns_to_idle();
   test_boost_min_dwell_blocks_early_release();
+  test_manual_overrides_fault();
+  test_uit_absolute_during_sensor_fault();
+  test_manual_to_auto_with_bad_sensors_enters_fault();
+  test_update_is_noop_before_configure();
+  test_seed_primes_hold_timer();
+  test_seed_primes_boost_dwell();
 
   if (g_failures == 0) {
     std::printf("All tests passed.\n");
