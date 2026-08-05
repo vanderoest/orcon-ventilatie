@@ -2,7 +2,7 @@
 
 ## v2.0.0
 
-Repair round, not a redesign: fixes the defects found in v1.0 and adds the autonomy/fail-safe guarantees required going forward. See `.plan` for the full design record and defect register, `TODO.md` for the step-by-step build log.
+Repair round, not a redesign: fixes the defects found in v1.0 and adds the autonomy/fail-safe guarantees required going forward. See `.plan` for the full design record and defect register, `ARCHITECTURE.md` for the resulting system.
 
 **Live config moved**: `docs/orcon-reference.yaml` (v1.0) is now frozen and never edited again. The live config is `orcon.yaml` in the repo root.
 
@@ -47,4 +47,4 @@ Per user instruction, `.plan`'s open questions were resolved using values alread
 
 ## v1.0
 
-Initial working configuration, `docs/orcon-reference.yaml`. See `REFERENCE-IMPLEMENTATION.md` for what it does and `.plan` for the defects later found in it.
+Initial working configuration, `docs/orcon-reference.yaml` — frozen, and the file itself is the reference for what it does. See `.plan` for the defects later found in it.

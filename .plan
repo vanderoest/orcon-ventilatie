@@ -1,5 +1,7 @@
 # .plan — Orcon controller: fix defects, make the ESP32 truly autonomous
 
+> **Historical record.** This is the design document for the v1.0 → v2.0.0 repair round, kept as written. Its file references are as of that time: `TODO.md` (the checklist, now completed and retired), `FUNCTIONAL-SPEC.md` and `REFERENCE-IMPLEMENTATION.md` (since merged into `ARCHITECTURE.md`). Remaining open items live in `BUGFIX.md`.
+
 **Status:** design complete, no implementation started
 **Supersedes:** the previous version of this file (external-component refactor that aimed to reproduce `docs/orcon-reference.yaml` byte-for-byte, including its defects). That framing is replaced: this round repairs the defects and adds the autonomy guarantees below. `TODO.md` is the executable checklist derived from this document.
 

@@ -6,7 +6,7 @@ This project replaces the original Orcon controller PCB with an ESP32 while pres
 
 The controller provides fully autonomous ventilation based on indoor air quality while remaining fully integrated with Home Assistant, Apple HomeKit and the built-in ESPHome web interface.
 
-The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `FUNCTIONAL-SPEC.md`.
+The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `ARCHITECTURE.md`.
 
 **Current version: 2.0.0.** See `CHANGELOG.md` for what changed from v1.0.
 
@@ -60,7 +60,7 @@ Long-term objectives include:
 * Reusable, host-testable controller logic (done — see `test/test_controller.cpp`)
 * An ESPHome external component (still a documented future option, not built yet)
 * Proportional CO₂ control (documented future option, not built yet)
-* Commanded-vs-actual RPM fault detection (blocked on a calibration pass — see `FUNCTIONAL-SPEC.md` § Known Gaps)
+* Commanded-vs-actual RPM fault detection (blocked on a calibration pass — see `ARCHITECTURE.md` § Known gaps)
 
 ---
 
@@ -74,12 +74,11 @@ Long-term objectives include:
 ├── test/
 │   └── test_controller.cpp       # Host regression tests (g++, no hardware)
 ├── docs/
-│   └── orcon-reference.yaml      # Frozen v1.0 reference — never edited again
-├── .plan                         # Design record for the v1.0 -> v2.0.0 repair
-├── TODO.md                       # Executable checklist derived from .plan
+│   └── orcon-reference.yaml      # Frozen v1.0 config — kept only as a fallback
+├── ARCHITECTURE.md               # Behaviour, hardware and configuration reference
+├── BUGFIX.md                     # Open defects, tuning recommendations, pending on-device checks
 ├── CHANGELOG.md
-├── FUNCTIONAL-SPEC.md            # Behavioural spec for orcon.yaml (v2.0.0)
-├── REFERENCE-IMPLEMENTATION.md   # Historical: describes docs/orcon-reference.yaml only
+├── .plan                         # Historical design record for the v1.0 -> v2.0.0 repair
 ├── README.md
 └── CLAUDE.md
 ```
@@ -98,9 +97,9 @@ Long-term objectives include:
 
 # Current Status
 
-`orcon.yaml` (repo root) is the live configuration, version 2.0.0. `docs/orcon-reference.yaml` is frozen at v1.0 and kept only as historical reference — see `REFERENCE-IMPLEMENTATION.md`.
+`orcon.yaml` (repo root) is the live configuration, version 2.0.0. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
 
-Open items not yet built: commanded-vs-actual fan RPM fault detection (needs a calibration pass) and an ESPHome external component. See `FUNCTIONAL-SPEC.md` § Known Gaps and `TODO.md`.
+Open items: two known defects, settings recommendations from field logs, and the on-device verification and tacho calibration that still need the physical unit — all tracked in `BUGFIX.md`. Longer-term options (external component, proportional control) are in `ARCHITECTURE.md` § Known gaps.
 
 ---
 

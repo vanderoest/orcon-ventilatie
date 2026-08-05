@@ -33,7 +33,7 @@ if (any_bad) {
 
 Manual modes never read the sensors — they map directly to a fixed speed — so sensor staleness has no business blocking them. But because FAULT is checked first, **any manual selection made while a sensor is warming up (every boot, ~80–90s) or glitches later is silently overridden to the FAULT idle speed instead of the requested speed.**
 
-**Why this matters:** `.plan`'s decisions table states, as a non-negotiable, already-agreed decision: *"UIT is absolute... it never overrides the user's UIT selection."* `FUNCTIONAL-SPEC.md`'s Manual Override invariant says the same for all manual modes. This is a direct violation of that decision, not a style nit — a `UIT` command during a sensor hiccup would leave the fan running at 15% instead of off.
+**Why this matters:** `.plan`'s decisions table states, as a non-negotiable, already-agreed decision: *"UIT is absolute... it never overrides the user's UIT selection."* `ARCHITECTURE.md` says the same for all manual modes ("thresholds are not evaluated and the fan holds the mode's fixed speed regardless of air quality"). This is a direct violation of that decision, not a style nit — a `UIT` command during a sensor hiccup would leave the fan running at 15% instead of off.
 
 **Suggested fix:** check mode before sensor validity. If `mode != AUTO`, always set `state_ = MANUAL` / `target_speed = manual_speed(mode)`, regardless of `any_bad`. Sensor validity should only gate the AUTO path. The `Problem`/FAULT diagnostic can still be raised independently of the state that drives fan speed (e.g. a separate "sensors read bad, AUTO won't work correctly if you switch back" flag), so the information isn't lost — it just stops being the same variable that decides fan speed.
 
@@ -75,6 +75,17 @@ That means the first one or two evaluations after boot run against the **header'
 
 Across `orcon2.log` + `orcon3.log`, ~17 minutes of continuous post-trigger data (08:36:49 → 08:50:02) never reached the RH-release threshold (55%) — RH peaked around 61% and has only come down to 59-60% so far. The eventual drop below 55% → dwell met → `HOLD` → timer expiry → `IDLE` sequence after a real shower still hasn't been confirmed on-device, only via the host test suite (`test_shower_detection_fires_and_clears`, `test_boost_min_dwell_blocks_early_release`). Per recommendation 2 above, capture a longer session through to actual release before concluding anything needs tuning.
 
-### 6. Why `orcon3.log` looks "stuck" in BOOST — hysteresis dead-band, not a bug
+### 6. Open verification — steps never run on hardware
+
+Carried over from the (now retired) build checklist. Everything below was implemented and verified as far as possible without a physical unit (host tests pass, `esphome config` and a full `esphome compile` both succeed), but these checks need the device:
+
+- Flash and confirm boot.
+- **Autonomy test:** stop Home Assistant entirely; confirm the log shows valid SNTP time, AUTO evaluations continue, the day/night profile is still correct, and mode changes via the ESPHome web GUI take effect.
+- **Persistence:** power-cycle while in HOOG and confirm it boots back into HOOG; clear the restore value and confirm fallback to AUTO.
+- **Fail-safe:** disconnect the I²C bus; confirm FAULT within the staleness timeout, fan at 15%, and clean recovery.
+- **HA entity_ids unchanged** across the v1.0→v2.0.0 filter split — check each of the four presentation sensors.
+- **Tacho calibration pass:** log RPM at commanded 0/15/25/30/35/40/55/85%. This is the prerequisite for the commanded-vs-actual RPM band check and a `fan_fault` entity; it cannot be fabricated and needs the unit running across the speed range.
+
+### 7. Why `orcon3.log` looks "stuck" in BOOST — hysteresis dead-band, not a bug
 
 **Source:** `orcon3.log`, entire file (08:41:32–08:50:02). RH sits at 59–60% the whole time: just under the 60% `rh_assert` (so it can't re-trigger BOOST further) but well above the 55% `rh_release` (so the already-latched RH assert/release pair — `include/orcon_controller.h:220-223` — never clears). The shower-rate latch has almost certainly already released on its own during this window: its release condition compares against a *rolling* 5-minute baseline (`rh_baseline()`, `include/orcon_controller.h:203-217`), so once RH has been flat for longer than the window, the "baseline" it compares against drifts up to meet the current value, and the rate-of-change naturally reads ~0. That's expected behavior for a rate detector, not a bug — but it does mean that once the rate latch clears, **the absolute RH latch is what's actually holding BOOST**, and it will keep holding until RH crosses below 55%, however long that takes. Given the CO₂ and tachometer evidence above (air exchange and fan speed both look normal), this is consistent with ordinary post-shower evaporation, not a control or ventilation-capacity problem. Revisit only per the condition in recommendation 2.
