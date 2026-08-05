@@ -1,15 +1,40 @@
 # Changelog
 
+## v2.0.3
+
+### Fixed
+
+- **A manual fan excursion could be misread as a shower** (`orcon8.log` 14:11:19). Running the fan up to 85% and back changes airflow across the SHT4x; when it settled, RH rebounded +4 %RH against a baseline made of *pre-excursion* samples, tripping the dRH/dt latch (`shower_rate_assert` 3.0) and driving a spurious BOOST. Returning from MANUAL/FAULT to IDLE already cleared the signal latches; it now clears the RH ring buffer too, so a manual excursion leaves no residue that steers AUTO — the same principle already applied to latches and hold timers. The buffer re-seeds from the first reading afterwards (`clear_rh_history()` forces an immediate push by zeroing the sample count), so rate detection is only blind for one sample interval, and the absolute 60% RH latch covers that window (`BUGFIX.md` #11).
+
+### Changed
+
+- The header version marker is logged **twice**: once at `on_boot` priority 800 (serial console only — the API does not exist yet) and again after the 15 s delay, which is the copy that reaches a network `esphome logs` capture. Early-boot logging invisibility is what made `orcon8.log` appear to be missing the marker entirely.
+
+## v2.0.2
+
+Follow-up round fixing defects that v2.0.1's own on-device rollout exposed (`orcon5.log` … `orcon7.log`). v2.0.1 shipped to the device but never ran correctly: the fan was never actually started in AUTO.
+
+Both the ESPHome project version and `orcon::kHeaderVersion` are `2.0.2` and must match — the boot log prints the header version, so a mismatch means a stale header went into the build.
+
+### Fixed
+
+- **Fan never actually started on a fresh boot** (`orcon5.log`, still failing in `orcon7.log`). v2.0.1's controller-side fix (force one command on the first evaluation) was correct but proved insufficient in practice, because a stale copy of `orcon_controller.h` in the build directory silently kept the old logic — a successful build and a fresh build timestamp prove only that *something* recompiled, not *which* header. The fan command in `orcon.yaml` now compares `out.target_speed` against the fan's **actual** `id(fan_motor).state`/`.speed` and commands on any mismatch, so the hardware is synced regardless of which header is deployed, and re-syncs after any out-of-band change. The decision (`target_speed`) still comes solely from the controller; only its *application* became authoritative over the hardware (`BUGFIX.md` #9).
+- **MANUAL speed leaked into AUTO during the cooldown window** (`orcon6.log`). Returning from a manual mode to AUTO while the 30 s cooldown was still active reported `state=IDLE` but kept commanding the manual speed (85%) until the cooldown expired — the cooldown branch reused the last commanded speed instead of deriving it from the current state. The commanded speed is now always `speed_for_state(state, profile)`, restoring the documented "setpoint is a function of (state, profile)" invariant. Also fixes the same defect across a day/night rollover landing inside a cooldown window (`BUGFIX.md` #10).
+
+### Added
+
+- **`orcon::kHeaderVersion`**, logged at boot by the priority-800 `on_boot` block alongside the seeded state/speed (`controller header 2.0.2 | seeded state=… speed=…`). Bump it on every header change. A stale header copy is otherwise completely invisible — this is what made `orcon7.log` misleading.
+- `changed=` / `sync=` / `fan_on=` / `fan_spd=` fields on the `air_quality` log line, making the fan-command path directly observable: whether the controller asked for a change, whether the hardware was out of sync, and the fan's actual state after applying.
+
 ## v2.0.1
 
-Bugfix round from field-log analysis. See `BUGFIX.md` for the findings and `BUGFIX.plan` for the implementation plan.
+Bugfix round from field-log analysis. Superseded by v2.0.2 — this version reached the device but the fan never started in AUTO. See `BUGFIX.md` for the findings and `BUGFIX.plan` for the implementation plan.
 
 ### Fixed
 
 - **FAULT overriding MANUAL/UIT.** `Controller::update()` checked sensor validity before mode, so a manual selection (including `UIT`) made while any control sensor was stale/NaN was silently overridden to the FAULT idle speed. Mode is now checked first — manual modes never read the sensors and are never blocked by them. `Problem` now reports "control sensors are bad" independent of state (also visible while in MANUAL), rather than "state == FAULT" (`BUGFIX.md` #1).
 - **Boot-time config/seed race.** A sensor's `on_value` or the mode select's `restore_value` could trigger a real evaluation before `on_boot`'s `configure()`/`seed()` had run, evaluating against the header's hardcoded defaults and an unseeded state instead of the YAML config and the restored globals. `configure()`/`seed()` now run at `on_boot` priority 800, before Wi-Fi/API and other components' `setup()`; `Controller::update()` is additionally a no-op until `configure()` has run, as a fail-safe independent of ESPHome's priority ordering. `seed()` now also primes the HOLD/BOOST timers relative to `millis()` at boot, so a restored HOLD or BOOST doesn't immediately expire/release on the first evaluation (`BUGFIX.md` #2).
-- **MANUAL speed leaked into AUTO during the cooldown window** (found on-device, `orcon6.log`). Returning from a manual mode to AUTO while the 30 s cooldown was still active reported `state=IDLE` but kept commanding the manual speed (85%) until the cooldown expired — the cooldown branch reused the last commanded speed instead of deriving it from the current state. The commanded speed is now always `speed_for_state(state, profile)`, restoring the documented "setpoint is a function of (state, profile)" invariant. Also fixes the same defect across a day/night rollover landing inside a cooldown window (`BUGFIX.md` #10).
-- **Fan never actually started on a fresh boot** (found on-device testing v2.0.1 itself, `orcon5.log`). The default/seeded `current_speed_` (15) equals both the FAULT and IDLE speed (also 15), so `target_speed == current_speed_` on the very first evaluation and `speed_changed` stayed false — the controller believed it was already running at 15% while the physical fan, which always boots off (`restore_mode: ALWAYS_OFF`), was never actually commanded. It stayed silently off until a manual mode picked a *different* speed. `Controller::update()` now forces exactly one real fan command on the first evaluation after `configure()`, regardless of whether the computed target happens to match the seeded speed.
+- **Fan never actually started on a fresh boot** (found on-device testing v2.0.1 itself, `orcon5.log`). The default/seeded `current_speed_` (15) equals both the FAULT and IDLE speed (also 15), so `target_speed == current_speed_` on the very first evaluation and `speed_changed` stayed false — the controller believed it was already running at 15% while the physical fan, which always boots off (`restore_mode: ALWAYS_OFF`), was never actually commanded. It stayed silently off until a manual mode picked a *different* speed. `Controller::update()` now forces exactly one real fan command on the first evaluation after `configure()`, regardless of whether the computed target happens to match the seeded speed. **This fix alone proved insufficient in the field — see v2.0.2.**
 
 ### Changed
 

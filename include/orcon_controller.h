@@ -13,6 +13,13 @@
 
 namespace orcon {
 
+// Bump on every change to this header. It is logged at boot (orcon.yaml's
+// priority-800 on_boot block), so the running firmware can be matched to an
+// exact header revision. A stale copy sitting in an ESPHome build/config
+// directory is otherwise completely invisible: the build succeeds, the build
+// timestamp updates, and the old logic keeps running.
+inline constexpr const char *kHeaderVersion = "2.0.3";
+
 enum class Mode { AUTO, UIT, RUST, LAAG, MEDIUM, HOOG };
 
 // IDLE/BOOST/HOLD is the sensor-driven cycle. FAULT and MANUAL are entered
@@ -149,6 +156,13 @@ class Controller {
       if (state_ == State::MANUAL || state_ == State::FAULT) {
         state_ = State::IDLE;
         clear_latches();
+        // A manual excursion changes airflow across the RH sensor, so the
+        // samples spanning it describe the fan, not the room. Keeping them
+        // let the post-excursion rebound read as a shower (orcon8.log
+        // 14:11:19: +4 %RH against a pre-excursion baseline -> BOOST). Same
+        // reasoning as clear_latches(): a manual excursion must leave no
+        // residue that steers AUTO. The buffer re-seeds on the next sample.
+        clear_rh_history();
       }
 
       if (any_bad) {
@@ -293,6 +307,16 @@ class Controller {
   }
 
   void clear_latches() { co2_latch_ = voc_latch_ = nox_latch_ = rh_latch_ = shower_latch_ = false; }
+
+  // Drops every RH sample. rh_hist_count_ == 0 makes the next note_rh() push
+  // immediately regardless of rh_sample_min_interval_ms, so the baseline
+  // re-seeds from the first reading after the excursion rather than stalling.
+  void clear_rh_history() {
+    for (auto &s : rh_hist_) s.valid = false;
+    rh_hist_idx_ = 0;
+    rh_hist_count_ = 0;
+    rh_last_push_ms_ = 0;
+  }
 
   bool is_night(const Inputs &in) const {
     // No valid time: fail to the DAY profile (more ventilation) rather than

@@ -343,6 +343,47 @@ static void test_manual_speed_does_not_leak_into_auto_cooldown() {
   CHECK(out.speed_changed);
 }
 
+// orcon8.log regression: a manual fan excursion perturbs airflow across the
+// RH sensor, and the pre-excursion samples left in the ring buffer became the
+// baseline for the post-excursion rebound — a +4 %RH "shower" that was really
+// just the fan slowing down. Leaving MANUAL must drop the RH history too.
+static void test_manual_exit_clears_rh_history() {
+  Controller c;
+  c.configure(Config());
+  uint32_t t = 0;
+
+  // Establish a steady 40% RH baseline.
+  for (int i = 0; i < 3; i++) {
+    Inputs in = clean_auto_inputs(t);
+    in.rh = 40;
+    c.update(in);
+    t += 30000;
+  }
+
+  // Manual excursion (the fan runs hard, disturbing the sensor).
+  Inputs in = clean_auto_inputs(t);
+  in.mode = Mode::HOOG;
+  in.rh = 40;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+
+  // Return to AUTO: latches and RH history are both dropped.
+  t += 30000;
+  in = clean_auto_inputs(t);
+  in.rh = 40;
+  out = c.update(in);
+  CHECK(out.state == State::IDLE);
+
+  // The post-excursion rebound (+4 %RH, above shower_rate_assert of 3.0) must
+  // NOT trigger BOOST: there is no stale pre-excursion baseline to measure it
+  // against any more. Without the history reset this asserts the shower latch.
+  t += 30000;
+  in = clean_auto_inputs(t);
+  in.rh = 44;
+  out = c.update(in);
+  CHECK(out.state == State::IDLE);
+}
+
 static void test_seed_primes_hold_timer() {
   Controller c;
   Config cfg; // hold_ms = 300000
@@ -386,6 +427,7 @@ int main() {
   test_update_is_noop_before_configure();
   test_first_evaluation_always_commands_fan();
   test_manual_speed_does_not_leak_into_auto_cooldown();
+  test_manual_exit_clears_rh_history();
   test_seed_primes_hold_timer();
   test_seed_primes_boost_dwell();
 

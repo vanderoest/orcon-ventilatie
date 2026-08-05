@@ -180,7 +180,26 @@ All four are worth having and they compose; they are not mutually exclusive. Lis
 
 **Fix:** `Controller` gained a `commanded_once_` flag. `speed_changed` is now `(target_speed != current_speed_) || !commanded_once_`, forcing exactly one real fan command on the first evaluation after `configure()`, regardless of whether the computed target happens to equal the seeded speed. Host-tested (`test_first_evaluation_always_commands_fan`).
 
-**Note on `orcon6.log`:** that log does *not* disprove the fix — it was captured from the **same binary as `orcon5.log`** (both report `compiled on 2026-08-05 13:22:57`), i.e. the device was rebooted but never reflashed. Its behaviour matches the unfixed code exactly. Item 9 remains unverified on hardware until a genuine reflash — `TODO.md` 6.5.
+**Note on `orcon6.log`:** that log does *not* disprove the fix — it was captured from the **same binary as `orcon5.log`** (both report `compiled on 2026-08-05 13:22:57`), i.e. the device was rebooted but never reflashed. Its behaviour matches the unfixed code exactly.
+
+**Note on `orcon7.log` — the header fix alone proved insufficient in practice.** This log *is* a genuinely new build (`compiled on 2026-08-05 13:53:34`), yet the first evaluation at 13:54:39 still produced `state=FAULT speed=15` with no `[fan]` line and 0 rpm. With the fixed header that is impossible: `commanded_once_` starts false, the `!configured_` guard returns *before* setting it, and every non-guarded `update()` logs — and 13:54:39 is the first `air_quality` line in the file, so `commanded_once_` must still have been false and `speed_changed` must have been true. The only consistent explanation is that **the header compiled into that build was not the fixed one** — a stale copy in the build/config directory. A successful build and a fresh build timestamp prove only that *something* recompiled, not *which* header went in.
+
+Two changes address this permanently:
+
+1. **`kHeaderVersion`** — a version string in `orcon_controller.h`, logged at boot by the priority-800 `on_boot` block (`controller header 2.0.2-fan-sync | seeded state=… speed=…`). A stale header is now visible in the first seconds of any log instead of being silently invisible. Bump it on every header change.
+2. **Hardware-state sync in `orcon.yaml`** — the fan command no longer trusts the controller's `speed_changed` alone. It also compares `out.target_speed` against the fan's *actual* `id(fan_motor).state` / `.speed` and commands whenever they disagree. This fixes the defect independently of which header is deployed, and re-syncs after any out-of-band change to the fan. The decision (`target_speed`) still comes solely from the controller — only the *application* of it became authoritative over the hardware. The `air_quality` log line now carries `changed=`, `sync=`, `fan_on=` and `fan_spd=` so the command path is directly observable.
+
+---
+
+## 11. A manual fan excursion is misread as a shower — FIXED
+
+**Source:** `orcon8.log` 14:11:19 — `state=BOOST speed=40 reason=boost_triggered` with `voc=69 co2=446 rh=47 nox=1`. Every absolute threshold (150 / 800 / 60 / 5) is far away, so only the dRH/dt latch could have fired. RH read 43 from 14:08:32 through 14:10:21, then 47 — a +4 %RH rise against `shower_rate_assert = 3.0`.
+
+**Cause:** between 14:10:05 and 14:10:15 the fan was manually driven 85% → 55% → back to 15%. That changes airflow (and self-heating) across the SHT4x, and RH rebounded once the fan slowed. Returning to AUTO calls `clear_latches()`, which correctly dropped the shower latch — but the RH ring buffer was left intact, so the pre-excursion 43s remained in the 5-minute window and became the baseline the post-excursion 47 was measured against. The controller was measuring its own fan, not the room.
+
+**Fix:** the `MANUAL/FAULT → IDLE` transition now also calls `clear_rh_history()`. This matches the intent already documented for that transition — a manual excursion must leave no residue that steers AUTO, exactly as with latches and hold timers. Zeroing `rh_hist_count_` makes the next `note_rh()` push immediately regardless of `rh_sample_min_interval_ms`, so the baseline re-seeds from the first reading after the excursion instead of stalling; rate detection is blind for one sample interval only, and the absolute RH latch still covers that window. Host-tested (`test_manual_exit_clears_rh_history`, verified to fail without the fix).
+
+**Verification note:** `orcon8.log` also confirmed item 9 is genuinely fixed. The tacho read 444 rpm at 14:08:29 — before the first *captured* evaluation at 14:08:32.965, which reported `changed=0 sync=0 fan_on=1 fan_spd=15`. An earlier evaluation during component setup had already forced the command via `commanded_once_`; its log (and the matching `[fan] >> ON`) never reached the network capture because the API was not yet connected. Early-boot logs only reach a serial console — which is also why the priority-800 header-version marker appeared to be missing.
 
 ---
 

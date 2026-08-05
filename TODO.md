@@ -155,9 +155,40 @@ never actually commanded.
       stays clean. **[H]/[C]**
 - [x] **6.4** Record the finding and fix in `BUGFIX.md` (item 9) and
       `CHANGELOG.md` (v2.0.1). **[C]**
-- [ ] **6.5** On device: fresh flash (or cleared restore values), confirm
-      `'Fan' >> ON` and a non-zero tacho reading appear on the very first
-      evaluation, without needing a manual mode switch first. **[HW]**
+- [x] **6.6** Add `orcon::kHeaderVersion` to the header, logged at boot by the
+      priority-800 block, so a stale header copy is visible instead of silent.
+      Bump it on every header change. **[C]**
+- [x] **6.7** Command the fan from the fan's *actual* state, not only
+      `speed_changed`: compare `id(fan_motor).state`/`.speed` against
+      `out.target_speed` and command on any mismatch. Fixes the defect
+      independently of which header is deployed. Log `changed=/sync=/fan_on=
+      /fan_spd=` to make the command path observable. **[C]**
+- [x] **6.5** On device: confirmed fixed in `orcon8.log`. Tacho read 444 rpm at
+      14:08:29, before the first captured evaluation (`changed=0 sync=0
+      fan_on=1 fan_spd=15` at 14:08:32.965) — an earlier setup-time evaluation
+      had already forced the command via `commanded_once_`. Its log did not
+      reach the network capture because the API was not yet connected. **[HW]**
+- [x] **6.8** Log the header marker a second time after the 15 s delay: the
+      priority-800 copy is serial-only (no API yet) and never appears in a
+      network `esphome logs` capture. **[C]**
+
+---
+
+## Phase 8 — Manual excursion misread as a shower
+
+`BUGFIX.md` item 11. `orcon8.log` 14:11:19: spurious `BOOST` after a manual
+85%→55%→15% excursion, because the pre-excursion RH samples stayed in the ring
+buffer and became the baseline for the post-excursion rebound.
+
+- [x] **8.1** Add host test `test_manual_exit_clears_rh_history`; verified it
+      fails without the fix. **[H]**
+- [x] **8.2** Call `clear_rh_history()` alongside `clear_latches()` on the
+      `MANUAL/FAULT → IDLE` transition. **[H]**
+- [x] **8.3** Bump `kHeaderVersion` and the project version to `2.0.3` (they
+      must always match), record in `BUGFIX.md` / `CHANGELOG.md`. **[C]**
+- [ ] **8.4** On device: run a manual excursion, return to AUTO, and confirm no
+      spurious BOOST follows as RH settles. Then confirm a *real* shower still
+      triggers BOOST. **[HW]**
       ⚠️ `orcon6.log` did **not** test this — it ran the same binary as
       `orcon5.log` (identical `compiled on 2026-08-05 13:22:57` stamp), so
       the device was rebooted, not reflashed. Confirm the build timestamp in

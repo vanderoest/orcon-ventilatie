@@ -3,7 +3,7 @@ esphome:
   friendly_name: Orcon
   project:
     name: "arjan.orcon-controller"
-    version: "2.0.1"
+    version: "2.0.3"
   includes:
     - include/orcon_controller.h
   on_boot:
@@ -54,8 +54,20 @@ esphome:
                 static_cast<orcon::State>(id(ctrl_state)),
                 id(current_target_speed),
                 millis());
+            // Proves which orcon_controller.h actually went into this build —
+            // a stale copy in the build/config dir is otherwise invisible.
+            // Serial console only: this runs before the API exists, so it
+            // never reaches `esphome logs` over the network. Repeated below.
+            ESP_LOGI("orcon", "controller header %s | seeded state=%s speed=%d",
+                     orcon::kHeaderVersion,
+                     orcon::state_name(orcon::instance().state()),
+                     orcon::instance().current_speed());
     - then:
         - delay: 15s
+        # Same marker again, after the delay — by now the API is connected, so
+        # this is the copy that actually shows up in a network log capture.
+        - lambda: |-
+            ESP_LOGI("orcon", "controller header %s", orcon::kHeaderVersion);
         - script.execute: evaluate_air_quality
 
 esp32:
@@ -318,9 +330,20 @@ script:
 
           Outputs out = orcon::instance().update(in);
 
-          // --- apply to hardware, only on change (mirrors v1.0's guard) ---
-          if (out.speed_changed) {
-            if (out.target_speed <= 0) {
+          // --- apply to hardware ---
+          // Sync against the fan's ACTUAL state, not only the controller's
+          // belief that the target changed. The fan boots physically off
+          // (restore_mode: ALWAYS_OFF) while the controller's seeded
+          // current_speed_ can already equal the freshly computed target, so
+          // a pure "did the target change" test leaves the hardware stopped
+          // indefinitely (BUGFIX.md #9). Comparing against the real fan state
+          // also re-syncs after any out-of-band change.
+          const bool want_on = out.target_speed > 0;
+          const bool fan_out_of_sync =
+              (id(fan_motor).state != want_on) ||
+              (want_on && id(fan_motor).speed != out.target_speed);
+          if (out.speed_changed || fan_out_of_sync) {
+            if (!want_on) {
               auto call = id(fan_motor).make_call();
               call.set_state(false);
               call.perform();
@@ -338,8 +361,16 @@ script:
           id(problem_binary_sensor).publish_state(out.fault);
           id(commanded_speed_sensor).publish_state(out.target_speed);
 
-          ESP_LOGI("air_quality", "state=%s speed=%d reason=%s (voc=%.0f co2=%.0f rh=%.0f nox=%.0f)",
+          // changed/sync/fan_* make the fan-command path visible in the log:
+          // changed = controller said the target moved, fan_on/fan_spd = the
+          // fan's actual state *after* applying. If these disagree with the
+          // commanded speed, the problem is in the hardware path, not control.
+          ESP_LOGI("air_quality",
+                   "state=%s speed=%d reason=%s changed=%d sync=%d fan_on=%d fan_spd=%d "
+                   "(voc=%.0f co2=%.0f rh=%.0f nox=%.0f)",
                    orcon::state_name(out.state), out.target_speed, out.reason,
+                   out.speed_changed ? 1 : 0, fan_out_of_sync ? 1 : 0,
+                   id(fan_motor).state ? 1 : 0, id(fan_motor).speed,
                    in.voc, in.co2, in.rh, in.nox);
 
           // --- diagnostics: SHT4x vs SCD4x cross-check (Step 9) ---
