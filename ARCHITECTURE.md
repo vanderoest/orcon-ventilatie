@@ -241,7 +241,7 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 ## Known gaps
 
 - **Commanded-vs-actual RPM fault detection** — needs a calibration pass (RPM at each commanded speed) that has not been run. `Fan Tacho` and `Commanded Fan Speed` are exposed for manual comparison; there is no `fan_fault` entity.
-- **Seasonal baseline drift** — the fixed absolute RH latch (60%/55%) can hold BOOST for hours in humid weather; a design decision on the fix (adaptive baseline, boost duration cap, or both) is open. See `BUGFIX.md` item 8 / `BUGFIX.plan` §8. Not yet implemented.
+- **Seasonal baseline drift** — the fixed absolute RH latch (60%/55%) can hold BOOST for hours in humid weather; a design decision on the fix (adaptive baseline, boost duration cap, or both) is open. See `BUGFIX.md` item 8. Not yet implemented.
 - **Proportional CO₂ control** and an **ESPHome external component** remain documented future options, not built.
 
 ---
@@ -250,4 +250,4 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 
 - Host tests: `make -C test` (or `g++ -std=c++17 -I include test/test_controller.cpp -o /tmp/t && /tmp/t`).
 - Config: `esphome config orcon.yaml`, and `esphome compile orcon.yaml` for the full ESP-IDF build.
-- On device: the autonomy test (stop Home Assistant; confirm SNTP time, continued AUTO evaluations, correct profile, working web-GUI mode changes) and the fail-safe test (disconnect the I²C bus; confirm FAULT within the staleness timeout, fan at 15%, clean recovery). Neither has been run yet — see `BUGFIX.md` § Open verification.
+- On device: the autonomy test (stop Home Assistant; confirm SNTP time, continued AUTO evaluations, correct profile, working web-GUI mode changes) and the fail-safe test (disconnect the I²C bus; confirm FAULT within the staleness timeout, fan at 15%, clean recovery). Neither has been run yet — see `TODO.md`.

@@ -8,7 +8,7 @@ The controller provides fully autonomous ventilation based on indoor air quality
 
 The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `ARCHITECTURE.md`.
 
-**Current version: 2.0.0.** See `CHANGELOG.md` for what changed from v1.0.
+**Current version: 2.0.3.** See `CHANGELOG.md` for what changed from v1.0.
 
 ---
 
@@ -52,7 +52,7 @@ The controller continues to operate autonomously even when Home Assistant is una
 
 # Project Goals
 
-v1.0 (`docs/orcon-reference.yaml`) was a functional but defective single-file ESPHome YAML — see `.plan` § Defect register. v2 is a **repair**, not a preservation exercise: known defects are fixed and explicit autonomy/fail-safe guarantees are added, while control decision logic moves out of YAML into a testable C++ header.
+v1.0 (`docs/orcon-reference.yaml`) was a functional but defective single-file ESPHome YAML. v2 is a **repair**, not a preservation exercise: known defects are fixed and explicit autonomy/fail-safe guarantees are added, while control decision logic moves out of YAML into a testable C++ header. See `CHANGELOG.md` for the defect-by-defect record.
 
 Long-term objectives include:
 
@@ -68,7 +68,7 @@ Long-term objectives include:
 
 ```text
 .
-├── orcon.yaml                    # Live configuration (v2.0.0)
+├── orcon.yaml                    # Live configuration (v2.0.3)
 ├── include/
 │   └── orcon_controller.h        # Controller decision logic, ESPHome-free, host-testable
 ├── test/
@@ -76,7 +76,8 @@ Long-term objectives include:
 ├── docs/
 │   └── orcon-reference.yaml      # Frozen v1.0 config — kept only as a fallback
 ├── ARCHITECTURE.md               # Behaviour, hardware and configuration reference
-├── BUGFIX.md                     # Open defects, tuning recommendations, pending on-device checks
+├── BUGFIX.md                     # Known open defects (fixed defects are in CHANGELOG.md)
+├── TODO.md                       # Open hardware verification and design decisions
 ├── CHANGELOG.md
 ├── README.md
 ```
@@ -95,16 +96,16 @@ Long-term objectives include:
 
 # Current Status
 
-`orcon.yaml` (repo root) is the live configuration, version 2.0.0. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
+`orcon.yaml` (repo root) is the live configuration, version 2.0.3. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
 
-Open items: two known defects, settings recommendations from field logs, and the on-device verification and tacho calibration that still need the physical unit — all tracked in `BUGFIX.md`. Longer-term options (external component, proportional control) are in `ARCHITECTURE.md` § Known gaps.
+One open item: the seasonal RH baseline drift design decision (`BUGFIX.md` item 8) — analysed, not implemented, needs a decision before any code is written. Longer-term options (external component, proportional control) are in `ARCHITECTURE.md` § Known gaps.
 
 ---
 
 # Building and Flashing
 
 ```sh
-cp secrets.yaml.example secrets.yaml   # fill in real wifi/api/ota/web credentials; gitignored
+cp secrets.yaml secrets.yaml           # fill in real wifi/api/ota/web credentials; gitignored
 esphome config orcon.yaml              # validate
 esphome run orcon.yaml                 # compile and flash
 ```

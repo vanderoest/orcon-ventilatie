@@ -52,18 +52,18 @@ the 15 s delay (visible over the network API).
 
 ## Open decision — blocks all work on seasonal RH drift
 
-- [ ] **D-1** Answer the five questions in `BUGFIX.plan` §8: which options are
-      in scope; boost-cap value / expiry target / re-arm rule; adaptive-baseline
-      window / freeze-during-BOOST / offsets / persistence; whether dew point
-      replaces or runs alongside the RH thresholds; and whether the HA outdoor
-      reference is wanted at all given the autonomy constraint. Record the
-      outcome in `BUGFIX.plan`. **No implementation task exists until this is
-      answered.** **[C]**
+- [ ] **D-1** Answer the five questions in `BUGFIX.md` item 8 ("Decision still
+      required"): which options are in scope; boost-cap value / expiry target /
+      re-arm rule; adaptive-baseline window / freeze-during-BOOST / offsets /
+      persistence; whether dew point replaces or runs alongside the RH
+      thresholds; and whether the HA outdoor reference is wanted at all given
+      the autonomy constraint. Record the outcome in `BUGFIX.md`. **No
+      implementation task exists until this is answered.** **[C]**
 
 ## Deferred, deliberately not scheduled
 
 - [ ] **X-1** Debounce near-simultaneous sensor triggers into a single
-      evaluation (`BUGFIX.plan` §4). Cosmetic log noise only, and the proposed
-      `mode: restart` + leading delay would change the timing of *every*
-      evaluation. Recommendation stands: leave as-is unless the noise becomes a
-      real annoyance. **[C]**
+      evaluation. Cosmetic log noise only, and the proposed `mode: restart` +
+      leading delay would change the timing of *every* evaluation.
+      Recommendation stands: leave as-is unless the noise becomes a real
+      annoyance. **[C]**

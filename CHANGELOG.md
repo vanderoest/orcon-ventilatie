@@ -28,7 +28,7 @@ Both the ESPHome project version and `orcon::kHeaderVersion` are `2.0.2` and mus
 
 ## v2.0.1
 
-Bugfix round from field-log analysis. Superseded by v2.0.2 — this version reached the device but the fan never started in AUTO. See `BUGFIX.md` for the findings and `BUGFIX.plan` for the implementation plan.
+Bugfix round from field-log analysis. Superseded by v2.0.2 — this version reached the device but the fan never started in AUTO.
 
 ### Fixed
 
@@ -47,7 +47,7 @@ Bugfix round from field-log analysis. Superseded by v2.0.2 — this version reac
 
 ### Known gap (design decision open, not implemented)
 
-- Fixed absolute RH thresholds (60%/55%) don't survive seasonal baseline drift — a shower BOOST ran for ≈3 hours in humid weather before a window was opened. See `BUGFIX.md` item 8 / `BUGFIX.plan` §8 for four candidate solutions; none is scheduled until the open questions there are decided.
+- Fixed absolute RH thresholds (60%/55%) don't survive seasonal baseline drift — a shower BOOST ran for ≈3 hours in humid weather before a window was opened. See `BUGFIX.md` item 8 for four candidate solutions; none is scheduled until the open questions there are decided.
 
 ## v2.0.0
 
