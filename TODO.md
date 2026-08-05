@@ -1,227 +1,69 @@
-# TODO — BUGFIX implementation checklist
+# TODO — open items only
 
-Derived from `BUGFIX.plan`. Each task is small and independently commit-able.
-`make -C test` must pass before and after every commit.
+Completed work is recorded in `CHANGELOG.md` and `BUGFIX.md`; only genuinely
+outstanding items live here. `make -C test` must pass before and after every
+commit.
 
-Legend: **[H]** host tests · **[HW]** hardware test · **[C]** configuration/docs only ·
-_(optional)_ = not required for the success criterion.
-
----
-
-## Phase 1 — Correctness bugs
-
-### 1.1 FAULT must not override MANUAL/UIT — `BUGFIX.plan` §1
-
-- [x] **1.1.1** Add failing host tests first: `test_manual_overrides_fault`,
-      `test_uit_absolute_during_sensor_fault`,
-      `test_manual_to_auto_with_bad_sensors_enters_fault` in
-      `test/test_controller.cpp`, registered in `main()`. **[H]**
-- [x] **1.1.2** In `include/orcon_controller.h` `update()`, check
-      `in.mode != Mode::AUTO` before `any_bad`; move the `any_bad` → FAULT
-      branch inside the AUTO path. **[H]**
-- [x] **1.1.3** Set `out.fault = any_bad;` (was `state_ == State::FAULT`) so the
-      `Problem` diagnostic survives the precedence change. No YAML edit. **[H]**
-- [x] **1.1.4** Confirm the full existing suite still passes unmodified
-      (`test_nan_enters_fault_and_recovers`,
-      `test_manual_roundtrip_returns_to_idle`). **[H]**
-      Note: these two, plus every other pre-existing test, needed one new
-      line each (`c.configure(Config());`) once 2.1.2 landed — the
-      `configured_` guard means a bare `Controller c;` no longer evaluates.
-      Behavioural assertions in both tests are unchanged.
-- [x] **1.1.5** Update `ARCHITECTURE.md` lines 82 / 143 / 172: manual precedence
-      is absolute; `Problem` now means "control sensors bad", not "state ==
-      FAULT". **[C]**
-
-### 1.2 Verification on device — `BUGFIX.plan` §1
-
-- [ ] **1.2.1** Boot with the select restored to `HOOG`; confirm 85 %
-      immediately, no 15 %/~80 s window. **[HW]**
-- [ ] **1.2.2** Select `UIT` during SGP41 stabilisation; confirm the fan stops
-      (the `target_speed <= 0` path in `orcon.yaml:314-323`). **[HW]**
+**Before trusting any device log:** confirm the boot log shows
+`controller header 2.0.3` and a fresh `compiled on` stamp. If it doesn't, the
+build used a stale header and nothing else in that log means anything. The
+marker appears twice — at priority 800 (serial console only) and again after
+the 15 s delay (visible over the network API).
 
 ---
 
-## Phase 2 — Boot sequence
+## Hardware verification — the v2.0.1–2.0.3 fixes
 
-### 2.1 Controller no-op until configured — `BUGFIX.plan` §2 (2b)
+- [ ] **HW-1** Manual is absolute: boot with the select restored to `HOOG` →
+      85 % immediately, no 15 %/~80 s FAULT window. Then select `UIT` during
+      SGP41 stabilisation → fan actually stops. `BUGFIX.md` #1.
+- [ ] **HW-2** Manual → AUTO *inside* the 30 s cooldown → fan drops to the AUTO
+      speed immediately, rather than holding the manual speed until the
+      cooldown expires. `BUGFIX.md` #10.
+- [ ] **HW-3** Manual excursion → back to AUTO → no spurious BOOST as RH
+      settles. Then confirm a **real** shower still triggers BOOST — this is
+      the one that matters most, since the fix works by deliberately forgetting
+      RH history. `BUGFIX.md` #11.
+- [ ] **HW-4** Boot seeding: confirm the priority-800 log reports the restored
+      `ctrl_state`/`current_target_speed`, not the globals' `initial_value`.
+      Serial console only. If priority 800 turns out to run *before* the
+      globals restore, lower it to the highest priority that still reads
+      restored values. `BUGFIX.md` #2.
+- [ ] **HW-5** Reboot parked in HOLD at night speed (25 %) → the first
+      evaluation uses the restored state and the YAML config.
 
-- [x] **2.1.1** Add host test `test_update_is_noop_before_configure`, including
-      the assertion that the gated call does not consume the cooldown. **[H]**
-- [x] **2.1.2** Add `bool configured_` to `Controller`, set in `configure()`;
-      early-return from `update()` with `reason = "not_configured"`,
-      `speed_changed = false`, before touching `evaluated_once_`/`last_eval_ms_`
-      /latches. **[H]**
+## Hardware verification — carried over, never run
 
-### 2.2 Prime timers in `seed()` — `BUGFIX.plan` §2 (edge case)
+- [ ] **HW-6** Autonomy: stop Home Assistant entirely → valid SNTP time, AUTO
+      evaluations continue, correct day/night profile, and mode changes via the
+      ESPHome web GUI take effect.
+- [ ] **HW-7** Persistence: power-cycle while in HOOG → boots into HOOG; clear
+      the restore value → falls back to AUTO.
+- [ ] **HW-8** Fail-safe: disconnect the I²C bus → FAULT within
+      `staleness_timeout_ms`, fan at 15 %, clean recovery.
+- [ ] **HW-9** HA entity_ids unchanged across the v1.0 → v2.0.0 filter split —
+      check all four presentation sensors.
+- [ ] **HW-10** Tacho calibration: log RPM at commanded
+      0/15/25/30/35/40/55/85 %. Record data only; no `fan_fault` entity is in
+      scope. Prerequisite for any future commanded-vs-actual RPM check.
+- [ ] **HW-11** `Sensor Disagreement` stays off across a full day plus one
+      shower at the new margin of 10; fall back to `"12"` if it proves noisy.
+      `BUGFIX.md` #3.
 
-- [x] **2.2.1** Add host tests `test_seed_primes_hold_timer` and
-      `test_seed_primes_boost_dwell`. **[H]**
-- [x] **2.2.2** Extend `seed()` to take `now_ms` and prime `hold_until_ms_` /
-      `boost_entered_ms_`; document that `configure()` must be called first.
-      **[H]**
-- [x] **2.2.3** Update the `seed(...)` call in `orcon.yaml:48-50` to pass
-      `millis()`. **[C]**
+## Open decision — blocks all work on seasonal RH drift
 
-### 2.3 Run configure/seed early — `BUGFIX.plan` §2 (2a)
+- [ ] **D-1** Answer the five questions in `BUGFIX.plan` §8: which options are
+      in scope; boost-cap value / expiry target / re-arm rule; adaptive-baseline
+      window / freeze-during-BOOST / offsets / persistence; whether dew point
+      replaces or runs alongside the RH thresholds; and whether the HA outdoor
+      reference is wanted at all given the autonomy constraint. Record the
+      outcome in `BUGFIX.plan`. **No implementation task exists until this is
+      answered.** **[C]**
 
-- [x] **2.3.1** Split `orcon.yaml:9-51` `on_boot` into an early
-      `priority: 800` block containing the existing configure/seed lambda
-      verbatim, and a default-priority block keeping `delay: 15s` +
-      `script.execute: evaluate_air_quality`. **[C]**
-- [x] **2.3.2** `esphome config` + `esphome compile` clean. **[C]**
-      Verified: `esphome config orcon.yaml` → "Configuration is valid!";
-      `esphome compile orcon.yaml` → "Successfully compiled program."
-- [ ] **2.3.3** On device: confirm the boot log shows the restored
-      `ctrl_state`/`current_target_speed` and not the globals' `initial_value`
-      — if priority 800 runs before globals restore, lower it to the highest
-      priority that still reads restored values. **[HW]**
-- [ ] **2.3.4** On device: reboot parked in HOLD at night speed (25 %) and
-      confirm the first evaluation uses the restored state and YAML config.
-      **[HW]**
-- [x] **2.3.5** Update `ARCHITECTURE.md` boot-sequence description and
-      `ARCHITECTURE.md:222` (open-defects pointer). **[C]**
+## Deferred, deliberately not scheduled
 
----
-
-## Phase 3 — Configuration changes
-
-- [x] **3.1** `orcon.yaml:154`: `humidity_disagreement_margin` `"15"` → `"10"`.
-      `BUGFIX.plan` §3. **[C]**
-- [x] **3.2** Update the `ARCHITECTURE.md:212` tuning table (value + drop the
-      "likely too loose" note). **[C]**
-- [ ] **3.3** On device: one full day plus one shower cycle with
-      `Sensor Disagreement` staying off; fall back to `"12"` if it proves noisy.
-      **[HW]**
-- [x] **3.4** Add a v2.0.1 section to `CHANGELOG.md` covering Phases 1–3. **[C]**
-
----
-
-## Phase 4 — Optional improvements
-
-- [ ] **4.1** _(decision task, not implementation)_ Resolve the five open
-      questions in `BUGFIX.plan` §8 "Decision still required": which options are
-      in scope, boost-cap value/target/re-arm, adaptive-baseline window/freeze/
-      offsets/persistence, dew point replace-or-alongside, and whether the HA
-      outdoor reference is wanted at all. Record the outcome in `.plan`. **[C]**
-      **No implementation task exists until this is answered.**
-- [ ] **4.2** _(optional, recommended not to do)_ Debounce near-simultaneous
-      sensor triggers into a single evaluation — `BUGFIX.plan` §4. Cosmetic log
-      noise only; the proposed `mode: restart` + leading delay changes the timing
-      of every evaluation. Leave open unless the noise becomes a real annoyance.
-      **[C]**
-
----
-
-## Phase 5 — Validation
-
-Hardware checks from `BUGFIX.plan` §6. Run 5.2 and 5.3 **after** Phases 1–2, as
-both touch those paths.
-
-- [ ] **5.1** Flash and confirm boot; first evaluation logged. **[HW]**
-- [ ] **5.2** Autonomy: stop Home Assistant entirely; confirm valid SNTP time,
-      continued AUTO evaluations, correct day/night profile, working mode changes
-      via the ESPHome web GUI. **[HW]**
-- [ ] **5.3** Persistence: power-cycle while in HOOG → boots into HOOG; clear the
-      restore value → falls back to AUTO. **[HW]**
-- [ ] **5.4** Fail-safe: disconnect I²C → FAULT within `staleness_timeout_ms`,
-      fan at 15 %, clean recovery. **[HW]**
-- [ ] **5.5** HA entity_ids unchanged across the v1.0 → v2.0.0 filter split —
-      check all four presentation sensors. **[HW]**
-- [ ] **5.6** Tacho calibration pass: log RPM at commanded
-      0/15/25/30/35/40/55/85 %. Record data only; no `fan_fault` entity in
-      scope. **[HW]**
-- [x] **5.7** Mark `BUGFIX.md` items 5 and 7 as closed/no-action and refresh
-      `ARCHITECTURE.md:231` so they are not re-verified. **[C]**
-      `BUGFIX.md` already carried "RESOLVED"/"No Action Required" status
-      headings for items 5 and 7. `ARCHITECTURE.md`'s Known Gaps entry that
-      pointed at items 1/2 as open defects was replaced with a pointer to
-      item 8 (the only defect still open).
-
----
-
-## Phase 6 — Fan never actually started on a fresh boot (found in v2.0.1 rollout)
-
-`BUGFIX.md` item 9. `orcon5.log`: fan stayed physically off (0 rpm) from boot
-until a manual mode picked a speed different from the seeded default; the
-first real AUTO/FAULT evaluation computed the same speed (15%) as the seeded
-`current_speed_`, so `speed_changed` never fired and the ALWAYS_OFF fan was
-never actually commanded.
-
-- [x] **6.1** Add host test `test_first_evaluation_always_commands_fan`. **[H]**
-- [x] **6.2** Add `bool commanded_once_` to `Controller`; `speed_changed =
-      (target_speed != current_speed_) || !commanded_once_`, set
-      `commanded_once_ = true` alongside. **[H]**
-- [x] **6.3** Confirm full suite passes (`make -C test`) and `esphome config`
-      stays clean. **[H]/[C]**
-- [x] **6.4** Record the finding and fix in `BUGFIX.md` (item 9) and
-      `CHANGELOG.md` (v2.0.1). **[C]**
-- [x] **6.6** Add `orcon::kHeaderVersion` to the header, logged at boot by the
-      priority-800 block, so a stale header copy is visible instead of silent.
-      Bump it on every header change. **[C]**
-- [x] **6.7** Command the fan from the fan's *actual* state, not only
-      `speed_changed`: compare `id(fan_motor).state`/`.speed` against
-      `out.target_speed` and command on any mismatch. Fixes the defect
-      independently of which header is deployed. Log `changed=/sync=/fan_on=
-      /fan_spd=` to make the command path observable. **[C]**
-- [x] **6.5** On device: confirmed fixed in `orcon8.log`. Tacho read 444 rpm at
-      14:08:29, before the first captured evaluation (`changed=0 sync=0
-      fan_on=1 fan_spd=15` at 14:08:32.965) — an earlier setup-time evaluation
-      had already forced the command via `commanded_once_`. Its log did not
-      reach the network capture because the API was not yet connected. **[HW]**
-- [x] **6.8** Log the header marker a second time after the 15 s delay: the
-      priority-800 copy is serial-only (no API yet) and never appears in a
-      network `esphome logs` capture. **[C]**
-
----
-
-## Phase 8 — Manual excursion misread as a shower
-
-`BUGFIX.md` item 11. `orcon8.log` 14:11:19: spurious `BOOST` after a manual
-85%→55%→15% excursion, because the pre-excursion RH samples stayed in the ring
-buffer and became the baseline for the post-excursion rebound.
-
-- [x] **8.1** Add host test `test_manual_exit_clears_rh_history`; verified it
-      fails without the fix. **[H]**
-- [x] **8.2** Call `clear_rh_history()` alongside `clear_latches()` on the
-      `MANUAL/FAULT → IDLE` transition. **[H]**
-- [x] **8.3** Bump `kHeaderVersion` and the project version to `2.0.3` (they
-      must always match), record in `BUGFIX.md` / `CHANGELOG.md`. **[C]**
-- [ ] **8.4** On device: run a manual excursion, return to AUTO, and confirm no
-      spurious BOOST follows as RH settles. Then confirm a *real* shower still
-      triggers BOOST. **[HW]**
-      ⚠️ `orcon6.log` did **not** test this — it ran the same binary as
-      `orcon5.log` (identical `compiled on 2026-08-05 13:22:57` stamp), so
-      the device was rebooted, not reflashed. Confirm the build timestamp in
-      the boot log changes before drawing any conclusion.
-      Watch for a follow-on possibility: if `'Fan' >> ON Speed: 15` *does*
-      fire at boot but the tacho still reads 0, the fan lacks starting
-      torque at 15% duty from standstill and needs a kickstart pulse — a
-      separate, physical issue, not this bug. All observed 15% running data
-      so far (444–492 rpm) was measured while coasting down from a higher
-      speed, never from rest.
-
----
-
-## Phase 7 — MANUAL speed leaking into AUTO during cooldown
-
-`BUGFIX.md` item 10. `orcon6.log` 13:44:22: `state=IDLE speed=85
-reason=cooldown` — IDLE state still commanding the manual 85% speed for
-~24 s, until the cooldown expired.
-
-- [x] **7.1** Add host test
-      `test_manual_speed_does_not_leak_into_auto_cooldown`. **[H]**
-- [x] **7.2** Cooldown branch: derive the speed via
-      `speed_for_state(state_, high_speed, hold_speed)` instead of reusing
-      `current_speed_`. **[H]**
-- [x] **7.3** Record in `BUGFIX.md` (item 10) and `CHANGELOG.md`. **[C]**
-- [ ] **7.4** On device: select a manual mode, return to AUTO within 30 s,
-      confirm the fan drops to the AUTO speed immediately rather than
-      holding the manual speed until the cooldown expires. **[HW]**
-
----
-
-## No action required (tracked, deliberately not scheduled)
-
-- `fan_speed_high_day` (40 %) — ruled out as a cause by CO₂ and tacho evidence.
-- Item 5 — full shower release/HOLD/dwell cycle, confirmed working on device.
-- Item 7 — BOOST held by the hysteresis dead-band is intended behaviour.
+- [ ] **X-1** Debounce near-simultaneous sensor triggers into a single
+      evaluation (`BUGFIX.plan` §4). Cosmetic log noise only, and the proposed
+      `mode: restart` + leading delay would change the timing of *every*
+      evaluation. Recommendation stands: leave as-is unless the noise becomes a
+      real annoyance. **[C]**

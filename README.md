@@ -52,7 +52,7 @@ The controller continues to operate autonomously even when Home Assistant is una
 
 # Project Goals
 
-v1.0 (`docs/orcon-reference.yaml`) was a functional but defective single-file ESPHome YAML — see `.plan` § Defect register. v2.0.0 is a **repair**, not a preservation exercise: known defects are fixed and explicit autonomy/fail-safe guarantees are added, while control decision logic moves out of YAML into a testable C++ header.
+v1.0 (`docs/orcon-reference.yaml`) was a functional but defective single-file ESPHome YAML — see `.plan` § Defect register. v2 is a **repair**, not a preservation exercise: known defects are fixed and explicit autonomy/fail-safe guarantees are added, while control decision logic moves out of YAML into a testable C++ header.
 
 Long-term objectives include:
 
@@ -78,9 +78,7 @@ Long-term objectives include:
 ├── ARCHITECTURE.md               # Behaviour, hardware and configuration reference
 ├── BUGFIX.md                     # Open defects, tuning recommendations, pending on-device checks
 ├── CHANGELOG.md
-├── .plan                         # Historical design record for the v1.0 -> v2.0.0 repair
 ├── README.md
-└── CLAUDE.md
 ```
 
 ---

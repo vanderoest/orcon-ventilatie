@@ -1,9 +1,8 @@
 # macOS
 .DS_Store
 old-meuk/
-
 # ESPHome
-secrets.yaml
 .esphome/
-
+#other
 *.log
+CLAUDE.md
