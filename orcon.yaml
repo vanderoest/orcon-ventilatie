@@ -3,7 +3,7 @@ esphome:
   friendly_name: Orcon
   project:
     name: "arjan.orcon-controller"
-    version: "2.0.0"
+    version: "2.0.1"
   includes:
     - include/orcon_controller.h
   on_boot:
