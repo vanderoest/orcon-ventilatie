@@ -4,3 +4,5 @@
 # ESPHome
 secrets.yaml
 .esphome/
+
+*.log
