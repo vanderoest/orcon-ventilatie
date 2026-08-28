@@ -1,9 +1,10 @@
 esphome:
   name: orcon
   friendly_name: Orcon
+  min_version: 2026.8.0
   project:
     name: "orcon.controller"
-    version: "2.1.1"
+    version: "2.1.2"
   on_boot:
     # Split in two: configure()/seed() must run before anything can trigger
     # an evaluation (a sensor's on_value, the select's restore_value), so it
@@ -188,6 +189,13 @@ substitutions:
   humidity_disagreement_margin: "10"
   temperature_disagreement_margin: "3"
 
+  # R3G190-RC05-20 tachometer: open-collector output, exactly one pulse per
+  # revolution. ESPHome pulse_counter reports pulses/min, so its numeric value
+  # is RPM without conversion. Treat >= 60 RPM (1 Hz) as physically running;
+  # this is safely below the fan's lowest commanded operating point while
+  # rejecting an isolated pulse as proof of motion.
+  fan_running_min_rpm: "60"
+
 globals:
   - id: ctrl_state
     type: int
@@ -259,6 +267,33 @@ binary_sensor:
     name: "Sensor Disagreement"
     id: sensor_disagreement_binary_sensor
     device_class: problem
+
+  # Physical feedback, deliberately separate from fan_motor.state: the fan
+  # entity represents the requested PWM command, while these entities report
+  # what the motor's tachometer actually proves. The feedback fault is delayed
+  # so normal spin-up and coast-down do not create a transient alarm.
+  - platform: template
+    name: "Fan Running"
+    id: fan_running_binary_sensor
+    device_class: running
+    entity_category: diagnostic
+    lambda: |-
+      if (isnan(id(orcon_rpm).state)) return {};
+      return id(orcon_rpm).state >= ${fan_running_min_rpm};
+
+  - platform: template
+    name: "Fan Feedback Problem"
+    id: fan_feedback_problem_binary_sensor
+    device_class: problem
+    entity_category: diagnostic
+    lambda: |-
+      if (isnan(id(orcon_rpm).state)) return {};
+      const bool expected_running = id(current_target_speed) > 0;
+      const bool physically_running = id(orcon_rpm).state >= ${fan_running_min_rpm};
+      return expected_running != physically_running;
+    filters:
+      - delayed_on: 30s
+      - delayed_off: 5s
 
 status_led:
   pin:
@@ -344,18 +379,23 @@ script:
           Outputs out = orcon::instance().update(in);
 
           // --- apply to hardware ---
-          // Sync against the fan's ACTUAL state, not only the controller's
-          // belief that the target changed. The fan boots physically off
-          // (restore_mode: ALWAYS_OFF) while the controller's seeded
-          // current_speed_ can already equal the freshly computed target, so
-          // a pure "did the target change" test leaves the hardware stopped
-          // indefinitely (BUGFIX.md #9). Comparing against the real fan state
-          // also re-syncs after any out-of-band change.
+          // fan_motor.state/speed is ESPHome's requested output state, not
+          // physical feedback. The R3G190-RC05-20 tacho supplies that feedback:
+          // one pulse/revolution, normalized by pulse_counter to RPM. Reissue
+          // the command if either the command entity or the physical running
+          // state disagrees with the controller target. Exact commanded-vs-RPM
+          // banding remains deferred until the speed calibration pass.
           const bool want_on = out.target_speed > 0;
-          const bool fan_out_of_sync =
+          const bool command_out_of_sync =
               (id(fan_motor).state != want_on) ||
               (want_on && id(fan_motor).speed != out.target_speed);
-          if (out.speed_changed || fan_out_of_sync) {
+          const float fan_rpm = id(orcon_rpm).state;
+          const bool fan_feedback_valid = !isnan(fan_rpm);
+          const bool fan_physically_running =
+              fan_feedback_valid && fan_rpm >= ${fan_running_min_rpm};
+          const bool physical_out_of_sync =
+              fan_feedback_valid && (fan_physically_running != want_on);
+          if (out.speed_changed || command_out_of_sync || physical_out_of_sync) {
             if (!want_on) {
               auto call = id(fan_motor).make_call();
               call.set_state(false);
@@ -374,16 +414,18 @@ script:
           id(problem_binary_sensor).publish_state(out.fault);
           id(commanded_speed_sensor).publish_state(out.target_speed);
 
-          // changed/sync/fan_* make the fan-command path visible in the log:
-          // changed = controller said the target moved, fan_on/fan_spd = the
-          // fan's actual state *after* applying. If these disagree with the
-          // commanded speed, the problem is in the hardware path, not control.
+          // Keep requested state and physical feedback explicit in the log.
+          // fan_cmd_* is ESPHome's command state; fan_rpm/fan_running comes
+          // from the tacho and is therefore the physical observation.
           ESP_LOGI("air_quality",
-                   "state=%s speed=%d reason=%s changed=%d sync=%d fan_on=%d fan_spd=%d "
+                   "state=%s speed=%d reason=%s changed=%d cmd_mismatch=%d physical_mismatch=%d "
+                   "fan_cmd_on=%d fan_cmd_spd=%d fan_rpm=%.0f fan_running=%d "
                    "(voc=%.0f co2=%.0f rh=%.0f nox=%.0f)",
                    orcon::state_name(out.state), out.target_speed, out.reason,
-                   out.speed_changed ? 1 : 0, fan_out_of_sync ? 1 : 0,
+                   out.speed_changed ? 1 : 0, command_out_of_sync ? 1 : 0,
+                   physical_out_of_sync ? 1 : 0,
                    id(fan_motor).state ? 1 : 0, id(fan_motor).speed,
+                   fan_rpm, fan_physically_running ? 1 : 0,
                    in.voc, in.co2, in.rh, in.nox);
 
           // --- diagnostics: SHT4x vs SCD4x cross-check (Step 9) ---
@@ -399,9 +441,11 @@ script:
 
 sensor:
 
-  - platform: pulse_counter # reports the fan tacho. Diagnostic only for now
-    # (learn-and-report mode): commanded-vs-actual RPM banding needs a
-    # calibration pass this round didn't have data for (open question 3).
+  - platform: pulse_counter
+    # R3G190-RC05-20: open-collector tacho, exactly 1 pulse/revolution.
+    # pulse_counter normalizes to pulses/min, so the value is directly RPM:
+    # 10 Hz = 10 pulses/s = 600 pulses/min = 600 RPM. Exact expected RPM bands
+    # per commanded percentage still need a calibration pass.
     pin: GPIO14
     unit_of_measurement: "rpm"
     name: 'Fan Tacho'
@@ -479,7 +523,7 @@ sensor:
       temperature_source: sht4x_air_temperature
       humidity_source: sht4x_air_humidity
 
-    voc:
+    voc_index:
       id: sgp4x_voc_index
       internal: true
       state_class: measurement
@@ -495,7 +539,7 @@ sensor:
       on_value:
         - script.execute: evaluate_air_quality
 
-    nox:
+    nox_index:
       id: sgp4x_nox_index
       internal: true
       state_class: measurement
@@ -594,3 +638,4 @@ fan:
     name: "Fan"
     platform: speed
     output: orcon_fan
+    restore_mode: ALWAYS_OFF

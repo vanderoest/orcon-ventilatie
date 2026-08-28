@@ -8,7 +8,7 @@ The controller provides fully autonomous ventilation based on indoor air quality
 
 The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `ARCHITECTURE.md`.
 
-**Current version: 2.1.1.** See `CHANGELOG.md` for what changed from v1.0.
+**Current version: 2.1.2.** See `CHANGELOG.md` for what changed from v1.0.
 
 ---
 
@@ -28,7 +28,8 @@ The controller continues to operate autonomously even when Home Assistant is una
 * Apple HomeKit support (via Home Assistant)
 * ESPHome Web Server
 * OTA firmware updates
-* Fan RPM monitoring
+* Physical fan-running feedback and RPM monitoring from the motor tachometer
+* Fan feedback alarm when commanded on/off state and measured rotation disagree
 * Extensive diagnostic logging
 * Hysteresis + minimum dwell (no threshold pumping)
 * Dual time source (Home Assistant + SNTP), safe degradation if both are unavailable
@@ -60,7 +61,9 @@ Long-term objectives include:
 * Reusable, host-testable controller logic (done — see `test/test_controller.cpp`)
 * An ESPHome external component, loadable directly from this GitHub repository (done in v2.1.0)
 * Proportional CO₂ control (documented future option, not built yet)
-* Commanded-vs-actual RPM fault detection (blocked on a calibration pass — see `ARCHITECTURE.md` § Known gaps)
+* Commanded-vs-actual RPM **band** fault detection (on/off feedback is built;
+  exact expected RPM per speed remains blocked on a calibration pass — see
+  `ARCHITECTURE.md` § Known gaps)
 
 ---
 
@@ -68,7 +71,7 @@ Long-term objectives include:
 
 ```text
 .
-├── orcon.yaml                    # Live configuration (v2.1.1)
+├── orcon.yaml                    # Live configuration (v2.1.2)
 ├── components/
 │   └── orcon/
 │       ├── __init__.py           # ESPHome external-component loader
@@ -98,9 +101,13 @@ Long-term objectives include:
 
 # Current Status
 
-`orcon.yaml` (repo root) is the live configuration, version 2.1.1. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
+`orcon.yaml` (repo root) is the live configuration, version 2.1.2. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
 
-One open item: the seasonal RH baseline drift design decision (`BUGFIX.md` item 8) — analysed, not implemented, needs a decision before any code is written. Proportional control remains a longer-term option in `ARCHITECTURE.md` § Known gaps.
+Known open items are the seasonal RH baseline drift design decision (`BUGFIX.md`
+item 8), calibrated expected-RPM bands per commanded speed, and proportional
+control. The first is analysed but deliberately not implemented pending a design
+decision; the other two remain longer-term options in `ARCHITECTURE.md` § Known
+gaps.
 
 ---
 

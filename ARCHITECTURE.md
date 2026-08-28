@@ -1,6 +1,6 @@
 # ARCHITECTURE — Orcon Ventilation Controller
 
-**Version:** 2.1.1 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
+**Version:** 2.1.2 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
 
 This document specifies **what the controller does and how it is built**: observable behaviour, hardware wiring, code structure, and configuration reference. An implementation is correct if and only if its observable behaviour matches this document and the state machine in `components/orcon/orcon_controller.h`.
 
@@ -46,7 +46,7 @@ Board `esp32dev`, framework `esp-idf` (Open AIR Mini).
 | GPIO4 | I²C SCL | i2c_sensor_1 | SHT4x, SGP4x, SCD4x |
 | GPIO12 | UART TX | uart_sensor_2 | Not connected |
 | GPIO13 | UART RX | uart_sensor_2 | Not connected |
-| GPIO14 | Pulse counter | GPIO | Tachometer input |
+| GPIO14 | Pulse counter | GPIO | Tachometer input (open collector, 1 pulse/revolution) |
 | GPIO15 | PWM output | ledc | Fan motor speed (inverted) |
 | GPIO16 | I²C SDA | i2c_sensor_1 | SHT4x, SGP4x, SCD4x |
 | GPIO18 | I²C SCL | i2c_sensor_2 | Not connected |
@@ -127,13 +127,13 @@ on the header's hardcoded defaults or an unseeded state.
 
 The mode select restores its own last value via `restore_value`. With no restored value (first boot, or cleared/corrupt restore) it falls back to `AUTO` — not the unconditional forced AUTO of v1.0.
 
-The `fan_motor` output itself is `restore_mode: ALWAYS_OFF` — it always boots
-physically off, independent of `current_target_speed`'s restored value. To
-guarantee the hardware is actually brought in sync, `Controller::update()`
-forces exactly one real fan command on the first evaluation after
-`configure()`, even if the computed target happens to equal the seeded
-speed (`BUGFIX.md` #9 — this was previously silently skipped, leaving the
-fan off indefinitely on a fresh boot).
+The `fan_motor` output itself is explicitly `restore_mode: ALWAYS_OFF` — it
+always boots with its PWM command off, independent of `current_target_speed`'s
+restored value. To guarantee a real command is issued, `Controller::update()`
+forces one fan command on the first evaluation after `configure()`, even if the
+computed target equals the seeded speed (`BUGFIX.md` #9). `fan_motor.state` and
+`.speed` are command state, not proof of rotation. Physical synchronization is
+checked separately against the tachometer as described below.
 
 ---
 
@@ -196,12 +196,32 @@ This keeps display smoothing from degrading the control input, which in v1.0 sha
 | `Time Valid` | binary_sensor | Off when neither time source is valid. |
 | `Sensor Disagreement` | binary_sensor (`problem`) | SHT4x vs SCD4x humidity/temperature divergence. |
 | `Commanded Fan Speed` | sensor (%) | Controller output, for comparison against tacho. |
-| `Fan Tacho` | sensor (rpm) | Pulse counter on GPIO14, 5 s interval. |
+| `Fan Tacho` | sensor (rpm) | Physical tachometer on GPIO14, sampled every 5 s. |
+| `Fan Running` | binary_sensor (`running`) | Physical running state derived from measured RPM, not the fan command entity. |
+| `Fan Feedback Problem` | binary_sensor (`problem`) | On after 30 s if commanded on/off state and measured rotation disagree; clears after 5 s of agreement. |
 | `SHT4x Humidity` / `SGP4x VOC Index` / `SGP4x NOx Index` / `SCD4x CO2` | sensor (copy) | HA presentation of the four control sensors. |
 | `SHT4x Temperature`, `SCD4x Temperature`, `SCD4x Humidity` | sensor | Not in the control loop; used for the cross-check. |
 | `WiFi Signal dB` / `WiFi Signal Percent` | sensor | Diagnostics. |
 
-Sensor update interval is 30 s for SHT4x, SGP4x and SCD4x. SGP4x takes compensation from `sht4x_air_temperature` and `sht4x_air_humidity`, and requires ~90 samples of stabilization after boot before VOC/NOx read meaningfully.
+Sensor update interval is 30 s for SHT4x, SGP4x and SCD4x. SGP4x takes compensation from `sht4x_air_temperature` and `sht4x_air_humidity`, and requires ~90 samples of stabilization after boot before VOC/NOx read meaningfully. The live configuration requires ESPHome 2026.8.0 or newer and uses the current `voc_index`/`nox_index` SGP4x keys; their deprecated `voc`/`nox` predecessors are scheduled for removal in ESPHome 2027.2.
+
+### Fan tachometer semantics
+
+The ebm-papst R3G190-RC05-20 provides an electrically isolated open-collector
+tachometer output with **one pulse per revolution**. ESPHome `pulse_counter`
+normalizes the observed pulse frequency to pulses per minute, so for this motor
+the numeric result is directly RPM: 10 Hz × 60 seconds = 600 pulses/min =
+600 RPM. No scale filter is required. The hardware interface must provide the
+pull-up required by an open-collector output.
+
+`Fan Running` asserts at 60 RPM (1 Hz), well below the lowest expected operating
+speed but above isolated pulse noise. The controller reissues its requested fan
+command when this physical on/off observation disagrees with its target. The
+separate delayed problem entity reports a persistent mismatch. It deliberately
+does not claim that a particular PWM percentage produced the correct RPM; that
+requires the still-open per-speed calibration pass.
+
+Motor source: [ebm-papst R3G190-RC05-20 datasheet, connection diagram page 4](https://www.fansco.com/datasheets/ebmpapst/R3G190-RC05-20.pdf).
 
 ---
 
@@ -234,6 +254,7 @@ All tunables are YAML substitutions in `orcon.yaml`, loaded into `Config` at boo
 | `staleness_timeout_ms` | 300000 | |
 | `humidity_disagreement_margin` | 10 | points — tuned from field data (SHT4x reads 6–8.5 points below SCD4x); see `BUGFIX.md` |
 | `temperature_disagreement_margin` | 3 | °C |
+| `fan_running_min_rpm` | 60 | Physical-running threshold; 1 Hz with this motor's 1 pulse/revolution tacho |
 
 Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value: true`). The four `*_last_valid_ms` staleness timers are runtime-only.
 
@@ -241,7 +262,9 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 
 ## Known gaps
 
-- **Commanded-vs-actual RPM fault detection** — needs a calibration pass (RPM at each commanded speed) that has not been run. `Fan Tacho` and `Commanded Fan Speed` are exposed for manual comparison; there is no `fan_fault` entity.
+- **Commanded-vs-actual RPM band detection** — physical on/off mismatch detection
+  is implemented, but deciding whether a running fan is at the correct speed
+  still needs a calibration pass (RPM at each commanded percentage).
 - **Seasonal baseline drift** — the fixed absolute RH latch (60%/55%) can hold BOOST for hours in humid weather; a design decision on the fix (adaptive baseline, boost duration cap, or both) is open. See `BUGFIX.md` item 8. Not yet implemented.
 - **Proportional CO₂ control** remains a documented future option, not built.
 
@@ -251,4 +274,4 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 
 - Host tests: `make -C test` (or `g++ -std=c++17 -I include test/test_controller.cpp -o /tmp/t && /tmp/t`).
 - Config: `esphome config orcon.yaml`, and `esphome compile orcon.yaml` for the full ESP-IDF build.
-- On device: the autonomy test (stop Home Assistant; confirm SNTP time, continued AUTO evaluations, correct profile, working web-GUI mode changes) and the fail-safe test (disconnect the I²C bus; confirm FAULT within the staleness timeout, fan at 15%, clean recovery). Neither has been run yet — see `TODO.md`.
+- On device: the autonomy test (stop Home Assistant; confirm SNTP time, continued AUTO evaluations, correct profile, working web-GUI mode changes), the fail-safe test (disconnect the I²C bus; confirm FAULT and clean recovery), and the fan-feedback test (command on/off and verify tacho-derived running/problem states). These have not been run yet — see `TODO.md`.

@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.1.2
+
+### Fixed
+
+- Replaced the deprecated SGP4x `voc`/`nox` configuration aliases with
+  `voc_index`/`nox_index`, preventing the configuration from breaking when the
+  aliases are removed in ESPHome 2027.2. The configuration now explicitly
+  requires ESPHome 2026.8.0 or newer, the release that introduced these names.
+- Fan synchronization and diagnostics no longer describe ESPHome's
+  `fan_motor.state` as physical feedback. That state remains the requested PWM
+  command; the R3G190-RC05-20 tachometer is now the physical source of truth.
+  A command is reissued when commanded on/off state and measured rotation
+  disagree, and new `Fan Running` and delayed `Fan Feedback Problem` entities
+  expose the result without false alarms during normal spin-up/coast-down.
+
+### Changed
+
+- Documented the R3G190-RC05-20 tachometer specification: open-collector output,
+  one pulse per revolution. ESPHome's pulses-per-minute value is therefore
+  directly RPM (`10 Hz = 600 RPM`); no conversion filter is required.
+- ESPHome project version and `orcon::kHeaderVersion` are both `2.1.2`.
+
 ## v2.1.1
 
 ### Fixed

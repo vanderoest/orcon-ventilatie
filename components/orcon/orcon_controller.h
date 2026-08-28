@@ -18,7 +18,7 @@ namespace orcon {
 // exact header revision. A stale copy sitting in an ESPHome build/config
 // directory is otherwise completely invisible: the build succeeds, the build
 // timestamp updates, and the old logic keeps running.
-inline constexpr const char *kHeaderVersion = "2.1.1";
+inline constexpr const char *kHeaderVersion = "2.1.2";
 
 enum class Mode { AUTO, UIT, RUST, LAAG, MEDIUM, HOOG };
 

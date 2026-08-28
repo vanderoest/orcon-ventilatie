@@ -36,6 +36,14 @@ The mechanism didn't misbehave. But for most of those three hours it was doing s
 
 **Ruled out as causes:** fan speed and airflow. CO₂ fell steadily throughout (509→459 ppm) and the tachometer held 1150–1220 rpm at commanded 40% — real air exchange at the commanded rate. Raising `fan_speed_high_day` would not have shortened the boost.
 
+**Tachometer fact confirmed for v2.1.2:** the ebm-papst R3G190-RC05-20
+connection diagram specifies an open-collector tach output with exactly one
+pulse per revolution. ESPHome reports pulse-counter frequency as pulses/min, so
+the value is directly RPM (`10 Hz = 600 RPM`) without a scale filter. This
+supports the RPM interpretation above; calibration is still needed only to
+define the normal RPM range for each commanded percentage. Source:
+[motor datasheet, connection diagram page 4](https://www.fansco.com/datasheets/ebmpapst/R3G190-RC05-20.pdf).
+
 ### Candidate solutions
 
 All four are worth having and they compose; they are not mutually exclusive. Listed by effort/benefit ratio.

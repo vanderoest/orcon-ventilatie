@@ -5,7 +5,7 @@ outstanding items live here. `make -C test` must pass before and after every
 commit.
 
 **Before trusting any device log:** confirm the boot log shows
-`controller header 2.1.1` and a fresh `compiled on` stamp. If it doesn't, the
+`controller header 2.1.2` and a fresh `compiled on` stamp. If it doesn't, the
 build used a stale header and nothing else in that log means anything. The
 marker appears twice — at priority 799 (serial console only) and again after
 the 15 s delay (visible over the network API).
@@ -42,12 +42,18 @@ the 15 s delay (visible over the network API).
       `staleness_timeout_ms`, fan at 15 %, clean recovery.
 - [ ] **HW-9** HA entity_ids unchanged across the v1.0 → v2.0.0 filter split —
       check all four presentation sensors.
-- [ ] **HW-10** Tacho calibration: log RPM at commanded
-      0/15/25/30/35/40/55/85 %. Record data only; no `fan_fault` entity is in
-      scope. Prerequisite for any future commanded-vs-actual RPM check.
+- [ ] **HW-10** RPM-band calibration: log RPM at commanded
+      0/15/25/30/35/40/55/85 %. The R3G190-RC05-20 datasheet confirms one
+      tach pulse/revolution, so ESPHome's pulses/min value already is RPM; this
+      pass determines the expected RPM *range* per command percentage.
 - [ ] **HW-11** `Sensor Disagreement` stays off across a full day plus one
       shower at the new margin of 10; fall back to `"12"` if it proves noisy.
       `BUGFIX.md` #3.
+- [ ] **HW-12** Fan feedback: command UIT and a non-zero mode and confirm
+      `Fan Running` follows the physical motor. Disconnect only the tacho signal
+      while commanded on and confirm `Fan Feedback Problem` asserts after 30 s,
+      then reconnect it and confirm clearing after 5 s. Verify normal spin-up
+      and coast-down do not raise a persistent problem.
 
 ## Open decision — blocks all work on seasonal RH drift
 
