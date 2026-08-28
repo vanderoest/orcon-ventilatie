@@ -77,10 +77,9 @@ esphome:
 #     type: local
 #     path: components
 external_components:
-  - source:
-      type: local
-      path: components
+  - source: github://vanderoest/orcon-ventilatie
     components: [orcon]
+    refresh: 0s
 
 # Loads the Orcon controller header for use by the YAML lambdas below.
 orcon:
