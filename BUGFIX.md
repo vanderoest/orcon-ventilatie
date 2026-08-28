@@ -64,3 +64,36 @@ Before any implementation task is created:
 3. Option 1: baseline window length; freeze-during-BOOST yes/no; assert/release offsets; persistence across reboot.
 4. Whether Option 3 replaces the RH thresholds or runs alongside them.
 5. Whether Option 4 is wanted at all, given the autonomy constraint.
+
+---
+
+## Small maintenance backlog — intentionally deferred
+
+**Status:** non-critical cleanup found during the v2.1.1 review. None of these
+items changes current controller behaviour; leave them for a separate
+maintenance pass.
+
+- **Repository hygiene:** `components/orcon/__pycache__/__init__.cpython-314.pyc`
+  is tracked, while `.gitignore` has no `__pycache__/` or `*.pyc` rule.
+- **Secrets documentation:** `README.md` says `cp secrets.yaml secrets.yaml`
+  and calls the result gitignored, but `secrets.yaml` is actually a tracked
+  dummy placeholder. Document a safe local-secrets workflow without treating
+  the committed placeholder values as leaked credentials.
+- **Stale documentation references:** the verification command in
+  `ARCHITECTURE.md` still names the former `include` path, and current source
+  comments/docs still refer to the no-longer-present `.plan` design file.
+- **External-component validation:** `components/orcon/__init__.py` is only a
+  header loader with an empty schema. YAML tunables (threshold ordering,
+  speeds, durations and hours) therefore receive no component-specific range
+  or relationship validation. `Config::staleness_timeout_ms` is also assigned
+  but the actual freshness check currently uses the YAML substitution
+  directly, leaving two apparent sources for that value.
+- **Strapping-pin documentation:** ESPHome warns that the existing GPIO12
+  (UART TX) and GPIO15 (fan PWM) assignments are ESP32 strapping pins. The
+  current hardware is left unchanged; document the electrical pull-up/down
+  constraints and prefer non-strapping pins in a future board revision.
+- **Automated checks:** there is no CI/integration assertion for ESPHome boot
+  ordering or publication-based staleness, and no automatic parity check
+  between `project.version` and `orcon::kHeaderVersion`. The host shower test
+  allows either BOOST or HOLD after release and does not conclusively prove
+  that the shower latch eventually clears.

@@ -399,6 +399,26 @@ static void test_seed_primes_hold_timer() {
   CHECK(strcmp(out.reason, "hold_active") == 0);
 }
 
+static void test_hold_expiry_survives_millis_wrap() {
+  Controller c;
+  Config cfg; // hold_ms = 300000
+  c.configure(cfg);
+  uint32_t now = UINT32_MAX - 100000U;
+  c.seed(State::HOLD, 35, now);
+
+  Inputs in = clean_auto_inputs(now);
+  Outputs out = c.update(in);
+  CHECK(out.state == State::HOLD);
+
+  // Unsigned addition deliberately wraps. The deadline comparison must still
+  // expire HOLD after its duration instead of keeping it active for ~49 days.
+  now += cfg.hold_ms + 1U;
+  in = clean_auto_inputs(now);
+  out = c.update(in);
+  CHECK(out.state == State::IDLE);
+  CHECK(strcmp(out.reason, "hold_expired") == 0);
+}
+
 static void test_seed_primes_boost_dwell() {
   Controller c;
   Config cfg; // boost_min_dwell_ms = 60000
@@ -429,6 +449,7 @@ int main() {
   test_manual_speed_does_not_leak_into_auto_cooldown();
   test_manual_exit_clears_rh_history();
   test_seed_primes_hold_timer();
+  test_hold_expiry_survives_millis_wrap();
   test_seed_primes_boost_dwell();
 
   if (g_failures == 0) {

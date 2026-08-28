@@ -1,6 +1,6 @@
 # ARCHITECTURE — Orcon Ventilation Controller
 
-**Version:** 2.1.0 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
+**Version:** 2.1.1 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
 
 This document specifies **what the controller does and how it is built**: observable behaviour, hardware wiring, code structure, and configuration reference. An implementation is correct if and only if its observable behaviour matches this document and the state machine in `components/orcon/orcon_controller.h`.
 
@@ -108,12 +108,13 @@ Any non-AUTO mode is the MANUAL state: thresholds are not evaluated and the fan 
 `on_boot` runs in two priority-ordered stages so the controller cannot be
 evaluated against unconfigured, unseeded state (BUGFIX.md #2):
 
-1. **Priority 800** (before Wi-Fi/API, before other components' `setup()`):
-   load tunables from YAML substitutions into `Config`, restore `ctrl_state`
-   and `current_target_speed` from flash, and call `configure()`/`seed()` on
-   the controller. `seed()` also primes the HOLD/BOOST timers relative to the
-   current `millis()`, so a restored HOLD or BOOST doesn't immediately expire
-   or satisfy its dwell on the first evaluation.
+1. **Priority 799** (after ESPHome restores globals at priority 800, before
+   sensors set up at priority 600): load tunables from YAML substitutions into
+   `Config`, read the restored `ctrl_state` and `current_target_speed`, and call
+   `configure()`/`seed()` on the controller. `seed()` also primes the
+   HOLD/BOOST timers relative to the current `millis()`, so a restored HOLD or
+   BOOST doesn't immediately expire or satisfy its dwell on the first
+   evaluation.
 2. **Default priority**: delay 15 s for hardware stabilization, then run one
    evaluation, which issues the first fan command through the same path as
    every other evaluation.
@@ -160,7 +161,7 @@ Shower detection uses a 10-slot RH ring buffer spanning ~5 minutes, with a minim
 
 Two independent sources: Home Assistant time (preferred) and onboard SNTP (fallback). Either alone satisfies the autonomy requirement.
 
-All durations — cooldown, dwell, hold, staleness — are measured on monotonic `millis()`, never wall-clock. Wall clock is used for exactly one thing: day/night profile selection. If neither source is valid, the **DAY profile** is used (more ventilation — safety over quietness) and the `Time Valid` binary_sensor turns off.
+All durations — cooldown, dwell, hold, staleness — are measured on monotonic `millis()`, never wall-clock. Deadline and elapsed-time comparisons are safe across the 32-bit `millis()` rollover. Wall clock is used for exactly one thing: day/night profile selection. If neither source is valid, the **DAY profile** is used (more ventilation — safety over quietness) and the `Time Valid` binary_sensor turns off.
 
 **Cooldown**: in AUTO only, evaluations are skipped if fewer than 30 s have elapsed since the last, except the first evaluation after boot. FAULT and MANUAL transitions are never gated — a stale sensor or mode change takes effect immediately.
 
@@ -168,7 +169,7 @@ All durations — cooldown, dwell, hold, staleness — are measured on monotonic
 
 ## Fail-safe
 
-Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset on every non-NaN reading. In AUTO, if any sensor is NaN or its last valid reading is older than 5 minutes, the controller enters FAULT: fan forced to 15% rather than freezing at its last speed. The `Problem` binary_sensor turns on whenever any control sensor is bad, independent of state — including while in MANUAL, where sensor validity has no effect on fan speed but is still worth surfacing as a diagnostic. Recovery is automatic on the next AUTO evaluation once all four sensors are valid.
+Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset only when that physical sensor publishes a new non-NaN raw value. It is deliberately not reset from the sensor's cached `.state`: when an I²C read fails, ESPHome may retain the previous finite state without publishing a measurement. In AUTO, if any sensor is NaN or its last real publication is older than 5 minutes, the controller enters FAULT: fan forced to 15% rather than freezing at its last speed. The `Problem` binary_sensor turns on whenever any control sensor is bad, independent of state — including while in MANUAL, where sensor validity has no effect on fan speed but is still worth surfacing as a diagnostic. Recovery is automatic on the next AUTO evaluation once all four sensors are valid.
 
 ---
 
@@ -176,7 +177,7 @@ Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset on 
 
 The four control sensors are split into two paths:
 
-- **Control** (`internal: true`, not exposed to HA): light median filter (window 3), unthrottled, feeding the controller as fast as the sensor updates (30 s).
+- **Control** (`internal: true`, not exposed to HA): light median filter (window 3) with `send_every: 1` and `send_first_at: 1`, feeding the controller at every sensor update (30 s).
 - **Presentation** (`platform: copy`, exposed to HA): carries the original v1.0 `name:`, `delta` and `throttle_average` filters, so HA entity_ids and dashboard behaviour are unchanged.
 
 This keeps display smoothing from degrading the control input, which in v1.0 shared a single filtered path.
@@ -206,7 +207,7 @@ Sensor update interval is 30 s for SHT4x, SGP4x and SCD4x. SGP4x takes compensat
 
 ## Evaluation triggers
 
-`evaluate_air_quality` runs on: boot (after the delay), mode change (`on_value` of the select), each control sensor's `on_value`, and a 2-minute watchdog interval. The script is `mode: single`. The watchdog exists because filtered sensors may not fire `on_value` on slow drift; unlike v1.0 it passes no parameters.
+`evaluate_air_quality` runs on: boot (after the delay), mode change (`on_value` of the select), each control sensor's `on_value`, and a 2-minute watchdog interval. The script is `mode: single`. Control filters publish every input sample; the watchdog guarantees a later evaluation when a sensor stops publishing entirely, so the publication timestamp can actually expire. Unlike v1.0 it passes no parameters.
 
 ---
 

@@ -3,14 +3,17 @@ esphome:
   friendly_name: Orcon
   project:
     name: "orcon.controller"
-    version: "2.1.0"
+    version: "2.1.1"
   on_boot:
     # Split in two: configure()/seed() must run before anything can trigger
     # an evaluation (a sensor's on_value, the select's restore_value), so it
     # runs at an early priority, before WIFI/API and before other components'
     # setup(). The delayed evaluation keeps its default priority so it still
     # runs after hardware/Wi-Fi stabilization (BUGFIX.md #2).
-    - priority: 800
+    # RestoringGlobalsComponent runs at priority 800. Use the next priority
+    # below it so ctrl_state/current_target_speed have actually been restored
+    # before seed() reads them, while still running before sensor setup (600).
+    - priority: 799
       then:
         # Load tunables from YAML substitutions into the controller (single
         # source of truth for thresholds/speeds/timing, same workflow as
@@ -74,9 +77,10 @@ esphome:
 #     type: local
 #     path: components
 external_components:
-  - source: github://vanderoest/orcon-ventilatie
+  - source:
+      type: local
+      path: components
     components: [orcon]
-    refresh: 0s
 
 # Loads the Orcon controller header for use by the YAML lambdas below.
 orcon:
@@ -317,6 +321,10 @@ script:
           else if (mode_str == "HOOG") mode = Mode::HOOG;
 
           // --- sensor inputs + staleness/NaN check ---
+          // The *_last_valid_ms globals are updated only by the physical
+          // sensors' on_raw_value callbacks below. A failed I2C read does not
+          // publish a new value, so its cached .state may remain finite; do
+          // not mistake that cached value for a fresh measurement here.
           Inputs in;
           in.now_ms = millis();
           in.hour = time_valid ? now.hour : 0;
@@ -329,11 +337,6 @@ script:
           in.nox = id(sgp4x_nox_index).state;
 
           uint32_t stale_ms = ${staleness_timeout_ms};
-          if (!isnan(in.voc)) id(voc_last_valid_ms) = in.now_ms;
-          if (!isnan(in.co2)) id(co2_last_valid_ms) = in.now_ms;
-          if (!isnan(in.rh))  id(rh_last_valid_ms)  = in.now_ms;
-          if (!isnan(in.nox)) id(nox_last_valid_ms) = in.now_ms;
-
           in.voc_ok = !isnan(in.voc) && (in.now_ms - id(voc_last_valid_ms) < stale_ms);
           in.co2_ok = !isnan(in.co2) && (in.now_ms - id(co2_last_valid_ms) < stale_ms);
           in.rh_ok  = !isnan(in.rh)  && (in.now_ms - id(rh_last_valid_ms)  < stale_ms);
@@ -452,6 +455,11 @@ sensor:
       filters:
         - median:
             window_size: 3
+            send_every: 1
+            send_first_at: 1
+      on_raw_value:
+        - lambda: |-
+            if (!isnan(x)) id(rh_last_valid_ms) = millis();
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -480,6 +488,11 @@ sensor:
       filters:
         - median:
             window_size: 3
+            send_every: 1
+            send_first_at: 1
+      on_raw_value:
+        - lambda: |-
+            if (!isnan(x)) id(voc_last_valid_ms) = millis();
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -491,6 +504,11 @@ sensor:
       filters:
         - median:
             window_size: 3
+            send_every: 1
+            send_first_at: 1
+      on_raw_value:
+        - lambda: |-
+            if (!isnan(x)) id(nox_last_valid_ms) = millis();
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -524,6 +542,11 @@ sensor:
       filters:
         - median:
             window_size: 3
+            send_every: 1
+            send_first_at: 1
+      on_raw_value:
+        - lambda: |-
+            if (!isnan(x)) id(co2_last_valid_ms) = millis();
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -558,9 +581,10 @@ output:
     pin: GPIO15
     inverted: true
 
-# Slow rise of values -due to the median filter- may not fire on_value, so
-# running every 2 minutes regardless. Unlike v1.0 (defect #1), no
-# trigger_source is passed — the script takes no parameters.
+# If a sensor stops publishing entirely, no sensor on_value can notice its
+# timestamp expiring. Run every 2 minutes regardless so FAULT is entered after
+# the staleness timeout. Unlike v1.0 (defect #1), no trigger_source is passed —
+# the script takes no parameters.
 interval:
   - interval: 2min
     then:

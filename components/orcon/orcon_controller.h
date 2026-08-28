@@ -14,11 +14,11 @@
 namespace orcon {
 
 // Bump on every change to this header. It is logged at boot (orcon.yaml's
-// priority-800 on_boot block), so the running firmware can be matched to an
+// priority-799 on_boot block), so the running firmware can be matched to an
 // exact header revision. A stale copy sitting in an ESPHome build/config
 // directory is otherwise completely invisible: the build succeeds, the build
 // timestamp updates, and the old logic keeps running.
-inline constexpr const char *kHeaderVersion = "2.1.0";
+inline constexpr const char *kHeaderVersion = "2.1.1";
 
 enum class Mode { AUTO, UIT, RUST, LAAG, MEDIUM, HOOG };
 
@@ -256,7 +256,9 @@ class Controller {
           boost_entered_ms_ = now_ms;
           return "boost_retrigger";
         }
-        if (now_ms >= hold_until_ms_) {
+        // Signed subtraction is the wrap-safe way to compare millis()-based
+        // deadlines, provided durations remain below half the uint32_t range.
+        if (static_cast<int32_t>(now_ms - hold_until_ms_) >= 0) {
           state_ = State::IDLE;
           return "hold_expired";
         }

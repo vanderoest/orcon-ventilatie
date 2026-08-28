@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.1.1
+
+### Fixed
+
+- **Sensor staleness could never expire after an I²C sensor stopped responding.** ESPHome retains the last published finite sensor state when a read produces no new publication. The central evaluation loop treated that cached state as fresh and reset all four timestamps on every run, so disconnecting the bus could leave AUTO running forever instead of entering FAULT. Each timestamp is now updated only from that physical sensor's `on_raw_value` publication; the evaluation loop only checks the timestamp. A cached value therefore becomes stale after five minutes as intended.
+- **Control updates were accidentally reduced from 30 s to 150 s.** ESPHome's median filter defaults to publishing every five input samples. All four control filters now explicitly use `send_every: 1` and `send_first_at: 1`, retaining the three-sample median window while publishing at every 30 s sensor update.
+- **Restored controller state could be read before ESPHome restored the globals.** The configure/seed boot stage shared priority 800 with `RestoringGlobalsComponent`, while registration order put the boot automation first. It now runs at priority 799: after restored globals (800), but before sensor setup (600).
+- **HOLD expiry failed across the 32-bit `millis()` rollover.** Deadline comparison now uses wrap-safe signed subtraction, with a host regression test covering a HOLD interval that crosses the rollover.
+
+### Changed
+
+- ESPHome project version and `orcon::kHeaderVersion` are both `2.1.1`.
+- Documentation now describes the corrected publication-based staleness tracking, 30 s control cadence, and boot ordering. Small non-functional maintenance work found during the review is recorded in `BUGFIX.md` and deliberately deferred.
+
 ## v2.1.0
 
 ### Added

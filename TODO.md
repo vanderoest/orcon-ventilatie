@@ -5,9 +5,9 @@ outstanding items live here. `make -C test` must pass before and after every
 commit.
 
 **Before trusting any device log:** confirm the boot log shows
-`controller header 2.1.0` and a fresh `compiled on` stamp. If it doesn't, the
+`controller header 2.1.1` and a fresh `compiled on` stamp. If it doesn't, the
 build used a stale header and nothing else in that log means anything. The
-marker appears twice — at priority 800 (serial console only) and again after
+marker appears twice — at priority 799 (serial console only) and again after
 the 15 s delay (visible over the network API).
 
 ---
@@ -24,11 +24,10 @@ the 15 s delay (visible over the network API).
       settles. Then confirm a **real** shower still triggers BOOST — this is
       the one that matters most, since the fix works by deliberately forgetting
       RH history. `BUGFIX.md` #11.
-- [ ] **HW-4** Boot seeding: confirm the priority-800 log reports the restored
+- [ ] **HW-4** Boot seeding: confirm the priority-799 log reports the restored
       `ctrl_state`/`current_target_speed`, not the globals' `initial_value`.
-      Serial console only. If priority 800 turns out to run *before* the
-      globals restore, lower it to the highest priority that still reads
-      restored values. `BUGFIX.md` #2.
+      Serial console only. Priority 799 is deliberately below the globals'
+      restore priority (800) and above sensor setup (600). `BUGFIX.md` #2.
 - [ ] **HW-5** Reboot parked in HOLD at night speed (25 %) → the first
       evaluation uses the restored state and the YAML config.
 
