@@ -5,7 +5,7 @@ outstanding items live here. `make -C test` must pass before and after every
 commit.
 
 **Before trusting any device log:** confirm the boot log shows
-`controller header 2.0.3` and a fresh `compiled on` stamp. If it doesn't, the
+`controller header 2.1.0` and a fresh `compiled on` stamp. If it doesn't, the
 build used a stale header and nothing else in that log means anything. The
 marker appears twice — at priority 800 (serial console only) and again after
 the 15 s delay (visible over the network API).

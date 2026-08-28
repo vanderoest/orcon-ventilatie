@@ -1,8 +1,8 @@
 # ARCHITECTURE — Orcon Ventilation Controller
 
-**Version:** 2.0.0 — describes the live configuration: `orcon.yaml` + `include/orcon_controller.h`.
+**Version:** 2.1.0 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
 
-This document specifies **what the controller does and how it is built**: observable behaviour, hardware wiring, code structure, and configuration reference. An implementation is correct if and only if its observable behaviour matches this document and the state machine in `include/orcon_controller.h`.
+This document specifies **what the controller does and how it is built**: observable behaviour, hardware wiring, code structure, and configuration reference. An implementation is correct if and only if its observable behaviour matches this document and the state machine in `components/orcon/orcon_controller.h`.
 
 `docs/orcon-reference.yaml` is the frozen v1.0 predecessor, kept only so the original single-file approach can be recovered if ever wanted. It is never edited and this document does not describe it; see `.plan` for the defect register that motivated replacing it.
 
@@ -29,7 +29,7 @@ Decision logic lives in C++, not YAML. This is the central architectural choice 
 
 | Path | Role |
 |---|---|
-| `include/orcon_controller.h` | All decision logic. ESPHome-free and hardware-free, so it compiles on a host. Exposes `Inputs` → `Controller::update()` → `Outputs`. |
+| `components/orcon/orcon_controller.h` | All decision logic. ESPHome-free and hardware-free, so it compiles on a host. Exposes `Inputs` → `Controller::update()` → `Outputs`. Loaded through the GitHub external component declared in `orcon.yaml`. |
 | `orcon.yaml` | Wiring only: gather sensor values into `Inputs`, call `update()`, apply `Outputs` to the fan and diagnostic entities. No decisions. |
 | `test/test_controller.cpp` | Host regression tests (`make -C test`), no hardware needed. |
 
@@ -242,7 +242,7 @@ Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value:
 
 - **Commanded-vs-actual RPM fault detection** — needs a calibration pass (RPM at each commanded speed) that has not been run. `Fan Tacho` and `Commanded Fan Speed` are exposed for manual comparison; there is no `fan_fault` entity.
 - **Seasonal baseline drift** — the fixed absolute RH latch (60%/55%) can hold BOOST for hours in humid weather; a design decision on the fix (adaptive baseline, boost duration cap, or both) is open. See `BUGFIX.md` item 8. Not yet implemented.
-- **Proportional CO₂ control** and an **ESPHome external component** remain documented future options, not built.
+- **Proportional CO₂ control** remains a documented future option, not built.
 
 ---
 

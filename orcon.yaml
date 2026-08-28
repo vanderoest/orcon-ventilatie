@@ -2,10 +2,8 @@ esphome:
   name: orcon
   friendly_name: Orcon
   project:
-    name: "arjan.orcon-controller"
-    version: "2.0.3"
-  includes:
-    - include/orcon_controller.h
+    name: "orcon.controller"
+    version: "2.1.0"
   on_boot:
     # Split in two: configure()/seed() must run before anything can trigger
     # an evaluation (a sensor's on_value, the select's restore_value), so it
@@ -69,6 +67,19 @@ esphome:
         - lambda: |-
             ESP_LOGI("orcon", "controller header %s", orcon::kHeaderVersion);
         - script.execute: evaluate_air_quality
+
+# During local component development, temporarily replace the source below
+# with:
+#   source:
+#     type: local
+#     path: components
+external_components:
+  - source: github://vanderoest/orcon-ventilatie
+    components: [orcon]
+    refresh: 0s
+
+# Loads the Orcon controller header for use by the YAML lambdas below.
+orcon:
 
 esp32:
   board: esp32dev

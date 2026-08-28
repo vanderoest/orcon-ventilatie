@@ -1,12 +1,12 @@
-// Host-run regression tests for include/orcon_controller.h.
+// Host-run regression tests for components/orcon/orcon_controller.h.
 //
 // Build & run:
-//   g++ -std=c++17 -Wall -Wextra -I../include test/test_controller.cpp -o /tmp/orcon_test && /tmp/orcon_test
+//   g++ -std=c++17 -Wall -Wextra test/test_controller.cpp -o /tmp/orcon_test && /tmp/orcon_test
 // or, from repo root:
 //   make -C test
 //
 // No ESPHome, no hardware — pure logic tests against orcon::Controller.
-#include "../include/orcon_controller.h"
+#include "../components/orcon/orcon_controller.h"
 
 #include <cstdio>
 #include <cstdlib>

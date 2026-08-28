@@ -1,7 +1,7 @@
 // Orcon ventilation controller — pure decision logic, ESPHome-free.
 //
 // Host-compilable: no Arduino/ESPHome headers, only the standard library.
-// Wired into orcon.yaml via `esphome: includes:`. YAML is wiring only —
+// Loaded by the ESPHome external component in components/orcon. YAML is wiring only —
 // gather Inputs, call update(), apply Outputs. No decisions live in YAML.
 //
 // See .plan §5 for the design this implements, and test/test_controller.cpp
@@ -18,7 +18,7 @@ namespace orcon {
 // exact header revision. A stale copy sitting in an ESPHome build/config
 // directory is otherwise completely invisible: the build succeeds, the build
 // timestamp updates, and the old logic keeps running.
-inline constexpr const char *kHeaderVersion = "2.0.3";
+inline constexpr const char *kHeaderVersion = "2.1.0";
 
 enum class Mode { AUTO, UIT, RUST, LAAG, MEDIUM, HOOG };
 

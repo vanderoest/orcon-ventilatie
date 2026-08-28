@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.1.0
+
+### Added
+
+- The controller is now an ESPHome external component in `components/orcon` and can be loaded directly from this GitHub repository with `external_components`.
+
+### Changed
+
+- `orcon.yaml` loads the controller through `github://vanderoest/orcon-ventilatie` with `refresh: 0s`; the former local `esphome.includes` entry is no longer needed.
+- Host tests and current documentation now use `components/orcon/orcon_controller.h`. Controller behaviour is unchanged.
+
 ## v2.0.3
 
 ### Fixed

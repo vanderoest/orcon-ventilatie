@@ -22,7 +22,7 @@ The two RH triggers behave completely differently with respect to baseline:
 
 | Trigger | Reference | Seasonally robust? |
 |---|---|---|
-| dRH/dt (shower detection) | *Rolling* 5-min baseline (`rh_baseline()`, `include/orcon_controller.h`) | **Yes** — self-adapting |
+| dRH/dt (shower detection) | *Rolling* 5-min baseline (`rh_baseline()`, `components/orcon/orcon_controller.h`) | **Yes** — self-adapting |
 | Absolute RH latch (60% / 55%) | Fixed constants | **No** — encodes one season's assumption |
 
 The rate detector fires on a +3 %RH *rise* regardless of starting point: 35→38 in winter behaves identically to 55→58 in summer. It needs no seasonal tuning, ever. It also releases on its own once RH plateaus, because its rolling baseline drifts up to meet the current value.
