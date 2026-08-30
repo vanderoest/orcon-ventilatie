@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.1.3
+
+### Fixed
+
+- Disabled ESPHome's default 15-minute API and Wi-Fi reboot timeouts. Home
+  Assistant or network loss can therefore no longer put the autonomous
+  controller into a periodic reboot loop.
+- Preserved restored AUTO state through the SGP4x startup blackout with a
+  bounded 120-second sensor grace. Sensor problems remain visible during the
+  grace and become FAULT if still unresolved at its deadline. The five signal
+  latch bits are now persisted too, so a reboot in a hysteresis band does not
+  silently discard the condition that held BOOST. A restored shower latch is
+  retained until a fresh RH history window exists to evaluate its release.
+- Added restartable per-sensor staleness watchdogs. A stopped publisher now
+  causes an evaluation at its five-minute freshness deadline instead of up to
+  two minutes later at the coarse safety interval.
+- Removed concentration device classes from the unitless SGP4x VOC and NOx
+  index entities.
+- Made the low-level `fan_motor` entity internal. `Manual Control` is the only
+  user-facing, authoritative fan control, so HA can no longer issue temporary
+  commands that the controller subsequently reverses.
+
+### Changed
+
+- ESPHome project version and `orcon::kHeaderVersion` are both `2.1.3`.
+- Added host regressions for startup grace, grace expiry, latch restoration and
+  an explicit MANUAL-to-AUTO transition during sensor warm-up.
+
 ## v2.1.2
 
 ### Fixed

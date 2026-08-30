@@ -8,7 +8,7 @@ The controller provides fully autonomous ventilation based on indoor air quality
 
 The controller continues to operate autonomously even when Home Assistant is unavailable — this is a hard requirement, not best-effort: see `ARCHITECTURE.md`.
 
-**Current version: 2.1.2.** See `CHANGELOG.md` for what changed from v1.0.
+**Current version: 2.1.3.** See `CHANGELOG.md` for what changed from v1.0.
 
 ---
 
@@ -34,7 +34,8 @@ The controller continues to operate autonomously even when Home Assistant is una
 * Hysteresis + minimum dwell (no threshold pumping)
 * Dual time source (Home Assistant + SNTP), safe degradation if both are unavailable
 * Fail-safe FAULT state on stale/invalid sensors (fan keeps running at a fixed idle speed)
-* State and last-selected mode persist across reboot
+* AUTO state, hysteresis latches and last-selected mode persist across reboot
+* No dependency-triggered reboot when Home Assistant or Wi-Fi is unavailable
 
 ---
 
@@ -71,7 +72,7 @@ Long-term objectives include:
 
 ```text
 .
-├── orcon.yaml                    # Live configuration (v2.1.2)
+├── orcon.yaml                    # Live configuration (v2.1.3)
 ├── components/
 │   └── orcon/
 │       ├── __init__.py           # ESPHome external-component loader
@@ -101,7 +102,7 @@ Long-term objectives include:
 
 # Current Status
 
-`orcon.yaml` (repo root) is the live configuration, version 2.1.2. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
+`orcon.yaml` (repo root) is the live configuration, version 2.1.3. `docs/orcon-reference.yaml` is frozen at v1.0, kept only so the original single-file approach can be recovered if ever wanted.
 
 Known open items are the seasonal RH baseline drift design decision (`BUGFIX.md`
 item 8), calibrated expected-RPM bands per commanded speed, and proportional

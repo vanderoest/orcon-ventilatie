@@ -18,7 +18,7 @@ namespace orcon {
 // exact header revision. A stale copy sitting in an ESPHome build/config
 // directory is otherwise completely invisible: the build succeeds, the build
 // timestamp updates, and the old logic keeps running.
-inline constexpr const char *kHeaderVersion = "2.1.2";
+inline constexpr const char *kHeaderVersion = "2.1.3";
 
 enum class Mode { AUTO, UIT, RUST, LAAG, MEDIUM, HOOG };
 
@@ -69,6 +69,7 @@ struct Config {
   uint32_t boost_min_dwell_ms = 60000;  // new in v2.0.0, .plan §3
   uint32_t cooldown_ms = 30000;         // unchanged from v1.0's cooldown_seconds
   uint32_t staleness_timeout_ms = 300000; // open question 7: reuses v1.0's 300s hold constant
+  uint32_t sensor_startup_grace_ms = 120000; // covers SGP4x's 90-s algorithm blackout
 };
 
 struct Inputs {
@@ -86,6 +87,7 @@ struct Outputs {
   bool fault = false;
   const char *reason = "init";
   bool speed_changed = false;
+  uint8_t latch_mask = 0;
 };
 
 class Controller {
@@ -96,15 +98,33 @@ class Controller {
   // device; defaults above are for host tests only).
   void configure(const Config &cfg) { cfg_ = cfg; configured_ = true; }
 
-  // Primes state/speed from restored (flash-persisted) values at boot, and
-  // primes the HOLD/BOOST timers relative to now_ms so a restored HOLD/BOOST
-  // doesn't immediately expire/release on the first evaluation. Call
+  // Primes state/speed/latches from restored (flash-persisted) values at boot,
+  // and primes the HOLD/BOOST timers relative to now_ms so a restored
+  // HOLD/BOOST doesn't immediately expire/release on the first evaluation. Call
   // configure() first so cfg_.hold_ms reflects the YAML config, not defaults.
-  void seed(State s, int speed, uint32_t now_ms) {
-    state_ = s;
+  void seed(State s, int speed, uint32_t now_ms, uint8_t latch_mask = 0) {
+    // MANUAL is owned by the separately restored select and is re-entered by
+    // update() when that select is actually non-AUTO. Never preserve MANUAL
+    // from a potentially torn/stale controller snapshot, and fail a corrupt
+    // enum value safely to IDLE.
+    switch (s) {
+      case State::IDLE:
+      case State::BOOST:
+      case State::HOLD:
+      case State::FAULT:
+        state_ = s;
+        break;
+      case State::MANUAL:
+      default:
+        state_ = State::IDLE;
+        break;
+    }
     current_speed_ = speed;
     hold_until_ms_ = now_ms + cfg_.hold_ms;
     boost_entered_ms_ = now_ms;
+    seeded_at_ms_ = now_ms;
+    startup_grace_active_ = true;
+    restore_latches(latch_mask);
   }
 
   State state() const { return state_; }
@@ -134,6 +154,7 @@ class Controller {
       out.reason = "not_configured";
       out.speed_changed = false;
       out.fault = false;
+      out.latch_mask = pack_latches();
       return out;
     }
 
@@ -149,27 +170,46 @@ class Controller {
     // them (BUGFIX.md #1) — mode is checked before any_bad. any_bad only
     // gates the AUTO path, below.
     if (in.mode != Mode::AUTO) {
+      // An explicit manual choice supersedes the restored AUTO startup state.
+      // If AUTO is selected again before the sensors are ready, normal FAULT
+      // handling applies rather than resurrecting that stale restored state.
+      startup_grace_active_ = false;
       state_ = State::MANUAL;
       out.reason = "manual_mode";
       out.target_speed = manual_speed(in.mode);
     } else {
-      if (state_ == State::MANUAL || state_ == State::FAULT) {
-        state_ = State::IDLE;
-        clear_latches();
-        // A manual excursion changes airflow across the RH sensor, so the
-        // samples spanning it describe the fan, not the room. Keeping them
-        // let the post-excursion rebound read as a shower (orcon8.log
-        // 14:11:19: +4 %RH against a pre-excursion baseline -> BOOST). Same
-        // reasoning as clear_latches(): a manual excursion must leave no
-        // residue that steers AUTO. The buffer re-seeds on the next sample.
-        clear_rh_history();
-      }
-
       if (any_bad) {
-        state_ = State::FAULT;
-        out.reason = "sensor_stale_or_invalid";
-        out.target_speed = cfg_.speed_fault;
+        const bool within_startup_grace =
+            startup_grace_active_ &&
+            (in.now_ms - seeded_at_ms_ < cfg_.sensor_startup_grace_ms);
+        if (within_startup_grace) {
+          // SGP4x deliberately publishes no indices during its initial
+          // 90-s algorithm blackout. Preserve the restored AUTO state during
+          // that bounded window instead of immediately destroying it through
+          // the normal invalid-sensor FAULT transition. `fault` still reports
+          // the unavailable inputs and the first call still commands the fan.
+          out.reason = "sensor_startup_grace";
+          out.target_speed = speed_for_state(state_, high_speed, hold_speed);
+        } else {
+          startup_grace_active_ = false;
+          state_ = State::FAULT;
+          out.reason = "sensor_stale_or_invalid";
+          out.target_speed = cfg_.speed_fault;
+        }
       } else {
+        startup_grace_active_ = false;
+        if (state_ == State::MANUAL || state_ == State::FAULT) {
+          state_ = State::IDLE;
+          clear_latches();
+          // A manual excursion changes airflow across the RH sensor, so the
+          // samples spanning it describe the fan, not the room. Keeping them
+          // let the post-excursion rebound read as a shower (orcon8.log
+          // 14:11:19: +4 %RH against a pre-excursion baseline -> BOOST). Same
+          // reasoning as clear_latches(): a manual excursion must leave no
+          // residue that steers AUTO. The buffer re-seeds on the next sample.
+          clear_rh_history();
+        }
+
         const bool first = !evaluated_once_;
         const bool cooling_down = !first && (in.now_ms - last_eval_ms_ < cfg_.cooldown_ms);
 
@@ -197,6 +237,7 @@ class Controller {
     // Reports "control sensors are bad", independent of state — true in
     // MANUAL too, since MANUAL no longer implies sensors are fine.
     out.fault = any_bad;
+    out.latch_mask = pack_latches();
     // The physical fan always boots off (orcon.yaml's restore_mode:
     // ALWAYS_OFF), regardless of what current_speed_ was seeded to. Without
     // this, a fresh boot whose first computed target (FAULT/IDLE, both
@@ -223,8 +264,11 @@ class Controller {
   uint32_t last_eval_ms_ = 0;
   uint32_t hold_until_ms_ = 0;
   uint32_t boost_entered_ms_ = 0;
+  uint32_t seeded_at_ms_ = 0;
+  bool startup_grace_active_ = false;
 
   bool co2_latch_ = false, voc_latch_ = false, nox_latch_ = false, rh_latch_ = false, shower_latch_ = false;
+  bool restored_shower_latch_pending_ = false;
 
   struct RhSample { uint32_t t_ms; float rh; bool valid = false; };
   RhSample rh_hist_[kRhHistorySlots] = {};
@@ -286,8 +330,15 @@ class Controller {
     const float baseline = rh_baseline(in.now_ms, in.rh, &rate);
     if (rate >= cfg_.shower_rate_assert_pct) {
       shower_latch_ = true;
+      restored_shower_latch_pending_ = false;
+    } else if (restored_shower_latch_pending_ && rh_hist_count_ < kRhHistorySlots) {
+      // A shower latch restored after reboot has no persisted RH history from
+      // which to prove its release. Keep it until a complete fresh window has
+      // been rebuilt; clearing it from the first post-boot sample would make
+      // persistence nominal only.
     } else if (rate < cfg_.shower_rate_release_pct && in.rh < baseline + cfg_.shower_release_margin_pct) {
       shower_latch_ = false;
+      restored_shower_latch_pending_ = false;
     }
   }
 
@@ -308,7 +359,27 @@ class Controller {
     return oldest_rh;
   }
 
-  void clear_latches() { co2_latch_ = voc_latch_ = nox_latch_ = rh_latch_ = shower_latch_ = false; }
+  void clear_latches() {
+    co2_latch_ = voc_latch_ = nox_latch_ = rh_latch_ = shower_latch_ = false;
+    restored_shower_latch_pending_ = false;
+  }
+
+  uint8_t pack_latches() const {
+    return (co2_latch_ ? 1U << 0 : 0U) |
+           (voc_latch_ ? 1U << 1 : 0U) |
+           (nox_latch_ ? 1U << 2 : 0U) |
+           (rh_latch_ ? 1U << 3 : 0U) |
+           (shower_latch_ ? 1U << 4 : 0U);
+  }
+
+  void restore_latches(uint8_t mask) {
+    co2_latch_ = (mask & (1U << 0)) != 0;
+    voc_latch_ = (mask & (1U << 1)) != 0;
+    nox_latch_ = (mask & (1U << 2)) != 0;
+    rh_latch_ = (mask & (1U << 3)) != 0;
+    shower_latch_ = (mask & (1U << 4)) != 0;
+    restored_shower_latch_pending_ = shower_latch_;
+  }
 
   // Drops every RH sample. rh_hist_count_ == 0 makes the next note_rh() push
   // immediately regardless of rh_sample_min_interval_ms, so the baseline

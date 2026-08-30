@@ -433,6 +433,134 @@ static void test_seed_primes_boost_dwell() {
   CHECK(out.state == State::BOOST);
 }
 
+static void test_startup_grace_preserves_restored_auto_state() {
+  Controller c;
+  Config cfg;
+  cfg.sensor_startup_grace_ms = 120000;
+  c.configure(cfg);
+  c.seed(State::HOLD, 35, 0);
+
+  Inputs in = clean_auto_inputs(15000);
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::HOLD);
+  CHECK(out.target_speed == 35);
+  CHECK(out.fault);
+  CHECK(out.speed_changed);
+  CHECK(strcmp(out.reason, "sensor_startup_grace") == 0);
+
+  // The grace is bounded. At the deadline, unavailable sensors must enter
+  // the normal fail-safe instead of preserving restored state indefinitely.
+  in.now_ms = cfg.sensor_startup_grace_ms;
+  out = c.update(in);
+  CHECK(out.state == State::FAULT);
+  CHECK(out.target_speed == 15);
+}
+
+static void test_valid_inputs_end_startup_grace() {
+  Controller c;
+  c.configure(Config());
+  c.seed(State::HOLD, 35, 0);
+
+  Inputs in = clean_auto_inputs(90000);
+  Outputs out = c.update(in);
+  CHECK(out.state == State::HOLD);
+  CHECK(!out.fault);
+
+  // Once real inputs have arrived, a later invalid sample is a runtime fault;
+  // the startup grace may not be re-entered.
+  in.now_ms += 1000;
+  in.voc_ok = false;
+  out = c.update(in);
+  CHECK(out.state == State::FAULT);
+}
+
+static void test_restored_latch_preserves_hysteresis_context() {
+  Controller before_reboot;
+  before_reboot.configure(Config());
+  Inputs in = clean_auto_inputs(0);
+  in.co2 = 900;
+  Outputs out = before_reboot.update(in);
+  CHECK(out.state == State::BOOST);
+  CHECK((out.latch_mask & 0x01U) != 0);
+
+  Controller after_reboot;
+  after_reboot.configure(Config());
+  after_reboot.seed(State::BOOST, 40, 1000, out.latch_mask);
+
+  // CO2 is now between release and assert. Without restoring the latch, the
+  // reboot would incorrectly treat this as clear and leave BOOST.
+  in = clean_auto_inputs(62000);
+  in.co2 = 750;
+  out = after_reboot.update(in);
+  CHECK(out.state == State::BOOST);
+  CHECK((out.latch_mask & 0x01U) != 0);
+
+  in.now_ms += 31000;
+  in.co2 = 699;
+  out = after_reboot.update(in);
+  CHECK(out.state == State::HOLD);
+  CHECK((out.latch_mask & 0x01U) == 0);
+}
+
+static void test_manual_choice_cancels_startup_grace() {
+  Controller c;
+  c.configure(Config());
+  c.seed(State::HOLD, 35, 0);
+
+  Inputs in = clean_auto_inputs(15000);
+  in.mode = Mode::HOOG;
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::MANUAL);
+  CHECK(out.target_speed == 85);
+
+  in.now_ms += 1000;
+  in.mode = Mode::AUTO;
+  out = c.update(in);
+  CHECK(out.state == State::FAULT);
+  CHECK(out.target_speed == 15);
+}
+
+static void test_restored_shower_latch_waits_for_fresh_history() {
+  Controller c;
+  c.configure(Config());
+  c.seed(State::BOOST, 40, 0, 0x10U);
+
+  Outputs out;
+  // Nine fresh samples span an incomplete post-reboot history window. A
+  // restored shower latch must not be cleared merely because the first samples
+  // form a flat baseline.
+  for (int i = 1; i <= 9; i++) {
+    Inputs in = clean_auto_inputs(static_cast<uint32_t>(i) * 30000U);
+    in.rh = 50;
+    out = c.update(in);
+    CHECK(out.state == State::BOOST);
+    CHECK((out.latch_mask & 0x10U) != 0);
+  }
+
+  // The tenth sample completes a new rolling window. With flat RH and no
+  // absolute trigger, the restored shower latch can now release into HOLD.
+  Inputs in = clean_auto_inputs(300000U);
+  in.rh = 50;
+  out = c.update(in);
+  CHECK(out.state == State::HOLD);
+  CHECK((out.latch_mask & 0x10U) == 0);
+}
+
+static void test_seed_does_not_restore_manual_without_manual_select() {
+  Controller c;
+  c.configure(Config());
+  c.seed(State::MANUAL, 85, 0);
+
+  Inputs in = clean_auto_inputs(15000);
+  in.voc_ok = in.co2_ok = in.rh_ok = in.nox_ok = false;
+  Outputs out = c.update(in);
+  CHECK(out.state == State::IDLE);
+  CHECK(out.target_speed == 15);
+  CHECK(strcmp(out.reason, "sensor_startup_grace") == 0);
+}
+
 int main() {
   test_hold_lasts_full_duration();
   test_day_night_rollover_preserves_state();
@@ -451,6 +579,12 @@ int main() {
   test_seed_primes_hold_timer();
   test_hold_expiry_survives_millis_wrap();
   test_seed_primes_boost_dwell();
+  test_startup_grace_preserves_restored_auto_state();
+  test_valid_inputs_end_startup_grace();
+  test_restored_latch_preserves_hysteresis_context();
+  test_manual_choice_cancels_startup_grace();
+  test_restored_shower_latch_waits_for_fresh_history();
+  test_seed_does_not_restore_manual_without_manual_select();
 
   if (g_failures == 0) {
     std::printf("All tests passed.\n");

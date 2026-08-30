@@ -4,7 +4,7 @@ esphome:
   min_version: 2026.8.0
   project:
     name: "orcon.controller"
-    version: "2.1.2"
+    version: "2.1.3"
   on_boot:
     # Split in two: configure()/seed() must run before anything can trigger
     # an evaluation (a sensor's on_value, the select's restore_value), so it
@@ -12,15 +12,17 @@ esphome:
     # setup(). The delayed evaluation keeps its default priority so it still
     # runs after hardware/Wi-Fi stabilization (BUGFIX.md #2).
     # RestoringGlobalsComponent runs at priority 800. Use the next priority
-    # below it so ctrl_state/current_target_speed have actually been restored
-    # before seed() reads them, while still running before sensor setup (600).
+    # below it so ctrl_state/current_target_speed/ctrl_latch_mask have actually
+    # been restored before seed() reads them, while still running before sensor
+    # setup (600).
     - priority: 799
       then:
         # Load tunables from YAML substitutions into the controller (single
         # source of truth for thresholds/speeds/timing, same workflow as
-        # v1.0), then restore last state/speed from flash before the first
-        # evaluation. Fan writes at boot go through the controller like any
-        # other evaluation — no more direct fan.turn_on bypassing bookkeeping.
+        # v1.0), then restore the last state, speed and hysteresis latches from
+        # flash before the first evaluation. Fan writes at boot go through the
+        # controller like any other evaluation — no more direct fan.turn_on
+        # bypassing bookkeeping.
         - lambda: |-
             orcon::Config cfg;
             cfg.co2_assert = ${co2_assert};
@@ -51,25 +53,32 @@ esphome:
             cfg.boost_min_dwell_ms = ${boost_min_dwell_ms};
             cfg.cooldown_ms = ${cooldown_ms};
             cfg.staleness_timeout_ms = ${staleness_timeout_ms};
+            cfg.sensor_startup_grace_ms = ${sensor_startup_grace_ms};
             orcon::instance().configure(cfg);
             orcon::instance().seed(
                 static_cast<orcon::State>(id(ctrl_state)),
                 id(current_target_speed),
-                millis());
+                millis(),
+                id(ctrl_latch_mask));
             // Proves which orcon_controller.h actually went into this build —
             // a stale copy in the build/config dir is otherwise invisible.
             // Serial console only: this runs before the API exists, so it
             // never reaches `esphome logs` over the network. Repeated below.
-            ESP_LOGI("orcon", "controller header %s | seeded state=%s speed=%d",
+            ESP_LOGI("orcon", "controller header %s | seeded state=%s speed=%d latches=0x%02X",
                      orcon::kHeaderVersion,
                      orcon::state_name(orcon::instance().state()),
-                     orcon::instance().current_speed());
+                     orcon::instance().current_speed(),
+                     static_cast<unsigned>(id(ctrl_latch_mask)));
     - then:
         - delay: 15s
         # Same marker again, after the delay — by now the API is connected, so
         # this is the copy that actually shows up in a network log capture.
         - lambda: |-
-            ESP_LOGI("orcon", "controller header %s", orcon::kHeaderVersion);
+            ESP_LOGI("orcon", "controller header %s | state=%s speed=%d latches=0x%02X",
+                     orcon::kHeaderVersion,
+                     orcon::state_name(orcon::instance().state()),
+                     orcon::instance().current_speed(),
+                     static_cast<unsigned>(id(ctrl_latch_mask)));
         - script.execute: evaluate_air_quality
 
 # During local component development, temporarily replace the source below
@@ -96,11 +105,18 @@ logger:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # Autonomy is a hard requirement: loss of infrastructure must not reboot
+  # the ventilation controller every 15 minutes. The fallback AP/web UI remains
+  # available when the normal WLAN is down.
+  reboot_timeout: 0s
   ap:
     ssid: "Orcon_Fallback"
     password: !secret wifi_password
 
 api:
+  # ESPHome defaults this to 15 minutes without an API client. That would make
+  # a Home Assistant outage reboot the otherwise autonomous controller.
+  reboot_timeout: 0s
   encryption:
     key: !secret api_encryption_key
 
@@ -184,6 +200,11 @@ substitutions:
   cooldown_ms: "30000"
   staleness_timeout_ms: "300000"
 
+  # SGP4x suppresses its indices during a 90-s algorithm blackout after boot.
+  # Preserve the restored AUTO state for a bounded window, while still raising
+  # the sensor Problem diagnostic; enter FAULT if inputs remain invalid after it.
+  sensor_startup_grace_ms: "120000"
+
   # Sensor cross-check margins (new in v2.0.0 diagnostics, .plan §6). No
   # v1.0 precedent exists for these; picked from typical sensor tolerance.
   humidity_disagreement_margin: "10"
@@ -205,6 +226,10 @@ globals:
     type: int
     restore_value: true
     initial_value: '15'
+  - id: ctrl_latch_mask
+    type: uint8_t
+    restore_value: true
+    initial_value: '0'
   - id: voc_last_valid_ms
     type: uint32_t
     initial_value: '0'
@@ -408,6 +433,7 @@ script:
           }
           id(current_target_speed) = out.target_speed;
           id(ctrl_state) = static_cast<int>(out.state);
+          id(ctrl_latch_mask) = out.latch_mask;
 
           id(controller_state_text).publish_state(orcon::state_name(out.state));
           id(last_decision_reason_text).publish_state(out.reason);
@@ -418,10 +444,11 @@ script:
           // fan_cmd_* is ESPHome's command state; fan_rpm/fan_running comes
           // from the tacho and is therefore the physical observation.
           ESP_LOGI("air_quality",
-                   "state=%s speed=%d reason=%s changed=%d cmd_mismatch=%d physical_mismatch=%d "
+                   "state=%s speed=%d reason=%s latches=0x%02X changed=%d cmd_mismatch=%d physical_mismatch=%d "
                    "fan_cmd_on=%d fan_cmd_spd=%d fan_rpm=%.0f fan_running=%d "
                    "(voc=%.0f co2=%.0f rh=%.0f nox=%.0f)",
                    orcon::state_name(out.state), out.target_speed, out.reason,
+                   static_cast<unsigned>(out.latch_mask),
                    out.speed_changed ? 1 : 0, command_out_of_sync ? 1 : 0,
                    physical_out_of_sync ? 1 : 0,
                    id(fan_motor).state ? 1 : 0, id(fan_motor).speed,
@@ -438,6 +465,33 @@ script:
           if (!isnan(sht_t) && !isnan(scd_t) && fabs(sht_t - scd_t) > ${temperature_disagreement_margin})
             disagreement = true;
           id(sensor_disagreement_binary_sensor).publish_state(disagreement);
+
+  # A publication restarts its sensor's deadline. If that sensor then stops
+  # publishing, this evaluates at the actual staleness boundary instead of
+  # waiting up to two extra minutes for the coarse safety interval below.
+  - id: voc_staleness_watchdog
+    mode: restart
+    then:
+      - delay: ${staleness_timeout_ms}ms
+      - script.execute: evaluate_air_quality
+
+  - id: nox_staleness_watchdog
+    mode: restart
+    then:
+      - delay: ${staleness_timeout_ms}ms
+      - script.execute: evaluate_air_quality
+
+  - id: co2_staleness_watchdog
+    mode: restart
+    then:
+      - delay: ${staleness_timeout_ms}ms
+      - script.execute: evaluate_air_quality
+
+  - id: rh_staleness_watchdog
+    mode: restart
+    then:
+      - delay: ${staleness_timeout_ms}ms
+      - script.execute: evaluate_air_quality
 
 sensor:
 
@@ -502,7 +556,10 @@ sensor:
             send_first_at: 1
       on_raw_value:
         - lambda: |-
-            if (!isnan(x)) id(rh_last_valid_ms) = millis();
+            if (!isnan(x)) {
+              id(rh_last_valid_ms) = millis();
+              id(rh_staleness_watchdog).execute();
+            }
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -527,7 +584,6 @@ sensor:
       id: sgp4x_voc_index
       internal: true
       state_class: measurement
-      device_class: volatile_organic_compounds
       filters:
         - median:
             window_size: 3
@@ -535,7 +591,10 @@ sensor:
             send_first_at: 1
       on_raw_value:
         - lambda: |-
-            if (!isnan(x)) id(voc_last_valid_ms) = millis();
+            if (!isnan(x)) {
+              id(voc_last_valid_ms) = millis();
+              id(voc_staleness_watchdog).execute();
+            }
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -543,7 +602,6 @@ sensor:
       id: sgp4x_nox_index
       internal: true
       state_class: measurement
-      device_class: nitrous_oxide
       filters:
         - median:
             window_size: 3
@@ -551,7 +609,10 @@ sensor:
             send_first_at: 1
       on_raw_value:
         - lambda: |-
-            if (!isnan(x)) id(nox_last_valid_ms) = millis();
+            if (!isnan(x)) {
+              id(nox_last_valid_ms) = millis();
+              id(nox_staleness_watchdog).execute();
+            }
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -559,7 +620,6 @@ sensor:
     source_id: sgp4x_voc_index
     name: "SGP4x VOC Index"
     state_class: measurement
-    device_class: volatile_organic_compounds
     filters:
       - delta: 5%
       - throttle_average: 30s
@@ -568,7 +628,6 @@ sensor:
     source_id: sgp4x_nox_index
     name: "SGP4x NOx Index"
     state_class: measurement
-    device_class: nitrous_oxide
     filters:
       - delta: 2%
       - throttle_average: 30s
@@ -589,7 +648,10 @@ sensor:
             send_first_at: 1
       on_raw_value:
         - lambda: |-
-            if (!isnan(x)) id(co2_last_valid_ms) = millis();
+            if (!isnan(x)) {
+              id(co2_last_valid_ms) = millis();
+              id(co2_staleness_watchdog).execute();
+            }
       on_value:
         - script.execute: evaluate_air_quality
 
@@ -624,10 +686,9 @@ output:
     pin: GPIO15
     inverted: true
 
-# If a sensor stops publishing entirely, no sensor on_value can notice its
-# timestamp expiring. Run every 2 minutes regardless so FAULT is entered after
-# the staleness timeout. Unlike v1.0 (defect #1), no trigger_source is passed —
-# the script takes no parameters.
+# Coarse belt-and-braces evaluation. Per-sensor restartable watchdogs above
+# enforce the exact freshness deadline; this interval also recovers evaluation
+# if a watchdog were ever interrupted. Unlike v1.0, the script has no parameters.
 interval:
   - interval: 2min
     then:
@@ -639,3 +700,6 @@ fan:
     platform: speed
     output: orcon_fan
     restore_mode: ALWAYS_OFF
+    # Low-level actuator only. Direct HA writes bypass the controller mode and
+    # were therefore temporary and misleading; Manual Control is authoritative.
+    internal: true

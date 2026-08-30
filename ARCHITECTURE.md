@@ -1,6 +1,6 @@
 # ARCHITECTURE — Orcon Ventilation Controller
 
-**Version:** 2.1.2 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
+**Version:** 2.1.3 — describes the live configuration: `orcon.yaml` + `components/orcon/orcon_controller.h`.
 
 This document specifies **what the controller does and how it is built**: observable behaviour, hardware wiring, code structure, and configuration reference. An implementation is correct if and only if its observable behaviour matches this document and the state machine in `components/orcon/orcon_controller.h`.
 
@@ -33,7 +33,7 @@ Decision logic lives in C++, not YAML. This is the central architectural choice 
 | `orcon.yaml` | Wiring only: gather sensor values into `Inputs`, call `update()`, apply `Outputs` to the fan and diagnostic entities. No decisions. |
 | `test/test_controller.cpp` | Host regression tests (`make -C test`), no hardware needed. |
 
-`Controller` is held as a single shared instance via `orcon::instance()`. The YAML `on_boot:` block loads tunables from substitutions into `Config` and seeds state from the restored globals.
+`Controller` is held as a single shared instance via `orcon::instance()`. The YAML `on_boot:` block loads tunables from substitutions into `Config` and seeds state, target speed and the five hysteresis latches from restored globals.
 
 ---
 
@@ -110,11 +110,11 @@ evaluated against unconfigured, unseeded state (BUGFIX.md #2):
 
 1. **Priority 799** (after ESPHome restores globals at priority 800, before
    sensors set up at priority 600): load tunables from YAML substitutions into
-   `Config`, read the restored `ctrl_state` and `current_target_speed`, and call
-   `configure()`/`seed()` on the controller. `seed()` also primes the
-   HOLD/BOOST timers relative to the current `millis()`, so a restored HOLD or
-   BOOST doesn't immediately expire or satisfy its dwell on the first
-   evaluation.
+   `Config`, read the restored `ctrl_state`, `current_target_speed` and
+   `ctrl_latch_mask`, and call `configure()`/`seed()` on the controller. `seed()`
+   also primes the HOLD/BOOST timers relative to the current `millis()`, so a
+   restored HOLD or BOOST doesn't immediately expire or satisfy its dwell on
+   the first evaluation.
 2. **Default priority**: delay 15 s for hardware stabilization, then run one
    evaluation, which issues the first fan command through the same path as
    every other evaluation.
@@ -134,6 +134,14 @@ forces one fan command on the first evaluation after `configure()`, even if the
 computed target equals the seeded speed (`BUGFIX.md` #9). `fan_motor.state` and
 `.speed` are command state, not proof of rotation. Physical synchronization is
 checked separately against the tachometer as described below.
+
+SGP4x deliberately withholds VOC/NOx output during its initial 90-second gas
+algorithm blackout. While AUTO inputs are unavailable, the controller preserves
+the restored state and latch context for a bounded 120-second startup grace,
+commands the speed belonging to that state, and still publishes `Problem: on`.
+Valid inputs end the grace immediately; inputs that remain invalid at the
+deadline enter normal FAULT. Selecting any MANUAL mode cancels the grace because
+an explicit user choice supersedes restored AUTO context.
 
 ---
 
@@ -161,6 +169,11 @@ Shower detection uses a 10-slot RH ring buffer spanning ~5 minutes, with a minim
 
 Two independent sources: Home Assistant time (preferred) and onboard SNTP (fallback). Either alone satisfies the autonomy requirement.
 
+Both ESPHome dependency reboot timers are explicitly disabled
+(`api.reboot_timeout: 0s`, `wifi.reboot_timeout: 0s`). Losing Home Assistant,
+the API client, or the normal WLAN must not reboot the ventilation controller;
+the fallback AP and web UI remain available during a WLAN outage.
+
 All durations — cooldown, dwell, hold, staleness — are measured on monotonic `millis()`, never wall-clock. Deadline and elapsed-time comparisons are safe across the 32-bit `millis()` rollover. Wall clock is used for exactly one thing: day/night profile selection. If neither source is valid, the **DAY profile** is used (more ventilation — safety over quietness) and the `Time Valid` binary_sensor turns off.
 
 **Cooldown**: in AUTO only, evaluations are skipped if fewer than 30 s have elapsed since the last, except the first evaluation after boot. FAULT and MANUAL transitions are never gated — a stale sensor or mode change takes effect immediately.
@@ -169,7 +182,7 @@ All durations — cooldown, dwell, hold, staleness — are measured on monotonic
 
 ## Fail-safe
 
-Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset only when that physical sensor publishes a new non-NaN raw value. It is deliberately not reset from the sensor's cached `.state`: when an I²C read fails, ESPHome may retain the previous finite state without publishing a measurement. In AUTO, if any sensor is NaN or its last real publication is older than 5 minutes, the controller enters FAULT: fan forced to 15% rather than freezing at its last speed. The `Problem` binary_sensor turns on whenever any control sensor is bad, independent of state — including while in MANUAL, where sensor validity has no effect on fan speed but is still worth surfacing as a diagnostic. Recovery is automatic on the next AUTO evaluation once all four sensors are valid.
+Each control sensor (VOC, CO₂, RH, NOx) has its own staleness timer, reset only when that physical sensor publishes a new non-NaN raw value. It is deliberately not reset from the sensor's cached `.state`: when an I²C read fails, ESPHome may retain the previous finite state without publishing a measurement. Each valid publication also restarts a dedicated script whose delay equals the freshness timeout; if no newer publication cancels it, the script evaluates at that exact deadline. In AUTO, after the bounded boot grace, any NaN sensor or publication age of at least 5 minutes enters FAULT: fan forced to 15% rather than freezing at its last speed. The `Problem` binary_sensor turns on whenever any control sensor is bad, independent of state — including during startup grace and while in MANUAL, where sensor validity has no effect on fan speed but is still worth surfacing as a diagnostic. Recovery is automatic on the next AUTO evaluation once all four sensors are valid.
 
 ---
 
@@ -189,7 +202,6 @@ This keeps display smoothing from degrading the control input, which in v1.0 sha
 | Entity | Type | Purpose |
 |---|---|---|
 | `Manual Control` | select | Mode selection; `restore_value`. |
-| `Fan` | fan (speed) | The fan itself. |
 | `Controller State` | text_sensor | IDLE/BOOST/HOLD/FAULT/MANUAL. |
 | `Last Decision Reason` | text_sensor | Why the last evaluation acted as it did. |
 | `Problem` | binary_sensor (`problem`) | On whenever any control sensor is bad, independent of state (so also on while in MANUAL). |
@@ -203,7 +215,11 @@ This keeps display smoothing from degrading the control input, which in v1.0 sha
 | `SHT4x Temperature`, `SCD4x Temperature`, `SCD4x Humidity` | sensor | Not in the control loop; used for the cross-check. |
 | `WiFi Signal dB` / `WiFi Signal Percent` | sensor | Diagnostics. |
 
-Sensor update interval is 30 s for SHT4x, SGP4x and SCD4x. SGP4x takes compensation from `sht4x_air_temperature` and `sht4x_air_humidity`, and requires ~90 samples of stabilization after boot before VOC/NOx read meaningfully. The live configuration requires ESPHome 2026.8.0 or newer and uses the current `voc_index`/`nox_index` SGP4x keys; their deprecated `voc`/`nox` predecessors are scheduled for removal in ESPHome 2027.2.
+`fan_motor` is an internal actuator, not a user-facing entity. Direct writes to
+it would bypass the state machine and be overwritten on the next evaluation;
+`Manual Control` is the only authoritative user control.
+
+Sensor update interval is 30 s for SHT4x, SGP4x and SCD4x. SGP4x takes compensation from `sht4x_air_temperature` and `sht4x_air_humidity`, and requires ~90 one-second samples of stabilization after boot before VOC/NOx publish. VOC Index and NOx Index are unitless and intentionally have no concentration device class. The live configuration requires ESPHome 2026.8.0 or newer and uses the current `voc_index`/`nox_index` SGP4x keys; their deprecated `voc`/`nox` predecessors are scheduled for removal in ESPHome 2027.2.
 
 ### Fan tachometer semantics
 
@@ -227,7 +243,7 @@ Motor source: [ebm-papst R3G190-RC05-20 datasheet, connection diagram page 4](ht
 
 ## Evaluation triggers
 
-`evaluate_air_quality` runs on: boot (after the delay), mode change (`on_value` of the select), each control sensor's `on_value`, and a 2-minute watchdog interval. The script is `mode: single`. Control filters publish every input sample; the watchdog guarantees a later evaluation when a sensor stops publishing entirely, so the publication timestamp can actually expire. Unlike v1.0 it passes no parameters.
+`evaluate_air_quality` runs on: boot (after the delay), mode change (`on_value` of the select), each control sensor's `on_value`, each per-sensor staleness deadline, and a coarse 2-minute safety interval. The script is `mode: single`. A valid raw publication restarts its sensor's deadline script; expiry therefore evaluates at the five-minute boundary even if every I²C publisher has stopped. The coarse interval remains belt-and-braces recovery. Unlike v1.0 the evaluation script passes no parameters.
 
 ---
 
@@ -252,11 +268,15 @@ All tunables are YAML substitutions in `orcon.yaml`, loaded into `Config` at boo
 | `boost_min_dwell_ms` | 60000 | |
 | `cooldown_ms` | 30000 | |
 | `staleness_timeout_ms` | 300000 | |
+| `sensor_startup_grace_ms` | 120000 | Preserve restored AUTO state while SGP4x completes its 90-s blackout |
 | `humidity_disagreement_margin` | 10 | points — tuned from field data (SHT4x reads 6–8.5 points below SCD4x); see `BUGFIX.md` |
 | `temperature_disagreement_margin` | 3 | °C |
 | `fan_running_min_rpm` | 60 | Physical-running threshold; 1 Hz with this motor's 1 pulse/revolution tacho |
 
-Persisted globals: `ctrl_state` and `current_target_speed` (both `restore_value: true`). The four `*_last_valid_ms` staleness timers are runtime-only.
+Persisted globals: `ctrl_state`, `current_target_speed` and `ctrl_latch_mask`
+(`restore_value: true`). The mask preserves the CO₂/VOC/NOx/RH/shower latch
+context needed for correct hysteresis after reboot. The four `*_last_valid_ms`
+staleness timestamps are runtime-only.
 
 ---
 

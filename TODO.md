@@ -5,7 +5,7 @@ outstanding items live here. `make -C test` must pass before and after every
 commit.
 
 **Before trusting any device log:** confirm the boot log shows
-`controller header 2.1.2` and a fresh `compiled on` stamp. If it doesn't, the
+`controller header 2.1.3` and a fresh `compiled on` stamp. If it doesn't, the
 build used a stale header and nothing else in that log means anything. The
 marker appears twice — at priority 799 (serial console only) and again after
 the 15 s delay (visible over the network API).
@@ -25,21 +25,28 @@ the 15 s delay (visible over the network API).
       the one that matters most, since the fix works by deliberately forgetting
       RH history. `BUGFIX.md` #11.
 - [ ] **HW-4** Boot seeding: confirm the priority-799 log reports the restored
-      `ctrl_state`/`current_target_speed`, not the globals' `initial_value`.
+      `ctrl_state`/`current_target_speed`/`ctrl_latch_mask`, not the globals'
+      `initial_value`.
       Serial console only. Priority 799 is deliberately below the globals'
       restore priority (800) and above sensor setup (600). `BUGFIX.md` #2.
 - [ ] **HW-5** Reboot parked in HOLD at night speed (25 %) → the first
-      evaluation uses the restored state and the YAML config.
+      evaluation uses the restored state and the YAML config during SGP4x
+      warm-up; `Problem` may be on, but state must remain HOLD and the fan must
+      not fall to FAULT speed. Repeat in BOOST with a value in its hysteresis
+      band and confirm the restored latch keeps BOOST active.
 
 ## Hardware verification — carried over, never run
 
-- [ ] **HW-6** Autonomy: stop Home Assistant entirely → valid SNTP time, AUTO
-      evaluations continue, correct day/night profile, and mode changes via the
-      ESPHome web GUI take effect.
+- [ ] **HW-6** Autonomy: stop Home Assistant entirely for at least 20 minutes →
+      no reboot, valid SNTP time, AUTO evaluations continue, correct day/night
+      profile, and mode changes via the ESPHome web GUI take effect. Repeat with
+      the normal WLAN unavailable via the fallback AP; neither API nor Wi-Fi
+      loss may trigger the old 15-minute reboot.
 - [ ] **HW-7** Persistence: power-cycle while in HOOG → boots into HOOG; clear
       the restore value → falls back to AUTO.
 - [ ] **HW-8** Fail-safe: disconnect the I²C bus → FAULT within
-      `staleness_timeout_ms`, fan at 15 %, clean recovery.
+      `staleness_timeout_ms` (allow scheduler jitter, not the former extra
+      two-minute interval), fan at 15 %, clean recovery.
 - [ ] **HW-9** HA entity_ids unchanged across the v1.0 → v2.0.0 filter split —
       check all four presentation sensors.
 - [ ] **HW-10** RPM-band calibration: log RPM at commanded
